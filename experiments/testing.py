@@ -107,23 +107,53 @@ def compute_duration_and_rate(trans: Transcription, reference_text: str) -> Dict
     }
 
 def align_and_repetition_metrics(reference_text: str, hypothesis_text: str) -> Dict[str, float]:
+    """
+    Robust to jiwer schema changes. We compute ref/hyp lengths from text,
+    and use jiwer only for insertions/deletions/substitutions/hits/wer.
+    """
     from jiwer import compute_measures
-    ref, hyp = normalize_text(reference_text), normalize_text(hypothesis_text)
-    m = compute_measures(ref, hyp)
 
-    r, h = m["reference length"], m["hypothesis length"]
-    ins, dels, subs = m["insertions"], m["deletions"], m["substitutions"]
-    hits = max(0, r - dels - subs)
+    # normalized strings + tokenized lengths
+    ref_norm = normalize_text(reference_text)
+    hyp_norm = normalize_text(hypothesis_text)
+    ref_len = float(len(ref_norm.split()))
+    hyp_len = float(len(hyp_norm.split()))
 
-    recall = hits / r if r > 0 else 0.0
-    precision = hits / h if h > 0 else 0.0
-    f1 = (2*precision*recall / (precision+recall)) if (precision+recall) > 0 else 0.0
+    m = compute_measures(ref_norm, hyp_norm)
+
+    # pull counts with safe defaults
+    ins = float(m.get("insertions", 0))
+    dels = float(m.get("deletions", 0))
+    subs = float(m.get("substitutions", 0))
+
+    # hits may not exist; derive if needed
+    hits = m.get("hits")
+    if not isinstance(hits, (int, float)):
+        hits = max(0.0, ref_len - dels - subs)
+    else:
+        hits = float(hits)
+
+    # precision/recall/F1
+    recall = (hits / ref_len) if ref_len > 0 else 0.0
+    precision = (hits / hyp_len) if hyp_len > 0 else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+    wer = float(m.get("wer", 0.0))
 
     return {
-        "wer": m["wer"], "precision": precision, "recall": recall, "f1": f1,
-        "insertions": ins, "deletions": dels, "substitutions": subs, "hits": hits,
-        "ref_len": r, "hyp_len": h,
+        "wer": wer,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "insertions": ins,
+        "deletions": dels,
+        "substitutions": subs,
+        "hits": hits,
+        "ref_len": ref_len,
+        "hyp_len": hyp_len,
     }
+
+
 
 def compute_pauses(words: Optional[List[WordStamp]], segments: List[Tuple[float, float, str]], duration_s: float, pause_threshold: float=0.35) -> Dict[str, float]:
     gaps = []
@@ -175,33 +205,93 @@ def analyze_pitch_and_loudness(audio_path: str, sr: int=16000) -> Dict[str, floa
 
 # ------------------ GPT-4o Audio Evaluation ------------------
 
-def gpt4o_pronunciation_eval(reference_text: str, audio_path: str, feats: Dict[str, float], model="gpt-4o-mini-transcribe") -> Dict:
+def gpt4o_pronunciation_eval(
+    reference_text: str,
+    audio_path: str,
+    feats: Dict[str, float],
+    model: str = "gpt-4o-audio-preview"  # or "gpt-4o-audio-mini" if your account has that
+) -> Dict:
+    """
+    Send reference text + audio to GPT-4o Audio via the Responses API using
+    input_audio (base64) and input_text blocks. Returns parsed JSON.
+    Falls back to text-only judging if audio input is not allowed.
+    """
+    import base64, json, os
     from openai import OpenAI
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
+    # Read & base64 the audio
     with open(audio_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
-    ext = os.path.splitext(audio_path)[1].lstrip(".") or "wav"
+    ext = (os.path.splitext(audio_path)[1].lstrip(".") or "wav").lower()
+    # Map common extensions to what the API expects
+    if ext == "m4a":
+        fmt = "aac"   # m4a container typically AAC codec; the API accepts "aac"
+    elif ext in {"wav", "mp3", "aac", "flac", "ogg", "webm"}:
+        fmt = ext
+    else:
+        fmt = "wav"
 
-    system_msg = (
-        "You are a pronunciation examiner. Given reference text, audio, and acoustic features, "
-        "return JSON with mispronunciation_accuracy, vowel_accuracy, mispronounced_words[], notes."
+    system_instructions = (
+        "You are a careful pronunciation examiner. "
+        "Given reference text, the user's spoken audio, and acoustic features, "
+        "respond ONLY in compact JSON with keys: "
+        "mispronunciation_accuracy (0..1), vowel_accuracy (0..1), "
+        "mispronounced_words (list of {word, reason}), notes (short string)."
     )
-    user_msg = "REFERENCE:\n" + reference_text + "\n\nFEATURES:\n" + json.dumps(feats, indent=2)
+    user_payload = (
+        "REFERENCE TEXT:\n" + reference_text.strip() + "\n\n"
+        "ACOUSTIC FEATURES (json):\n" + json.dumps(feats, indent=2)
+    )
 
-    resp = client.chat.completions.create(
-        model=model,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": [
-                {"type": "input_text", "text": user_msg},
-                {"type": "input_audio", "input_audio": {"data": b64, "format": ext}}
-            ]}
-        ],
-        temperature=0.0,
-    )
-    return json.loads(resp.choices[0].message.content)
+    # Try audio+text via Responses API
+    try:
+        resp = client.responses.create(
+            model=model,
+            response_format={"type": "json_object"},
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": system_instructions + "\n\n" + user_payload},
+                    {"type": "input_audio", "audio": {"data": b64, "format": fmt}}
+                ]
+            }]
+        )
+        # Parse JSON string from the first text output
+        content = resp.output[0].content[0].text
+        return json.loads(content)
+
+    except Exception as e_audio:
+        # Fallback: text-only judging (no audio), so your run still completes
+        try:
+            resp2 = client.responses.create(
+                model="gpt-4o-mini",
+                response_format={"type": "json_object"},
+                input=[{
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": (
+                            system_instructions + "\n\n" + user_payload +
+                            "\n\nNOTE: Audio block could not be processed (" + str(e_audio) +
+                            "). Estimate based on text and features only."
+                        )
+                    }]
+                }]
+            )
+            content2 = resp2.output[0].content[0].text
+            data = json.loads(content2)
+            data.setdefault("notes", "")
+            data["notes"] = (data["notes"] + " (text-only fallback used)").strip()
+            return data
+        except Exception as e_text:
+            return {
+                "mispronunciation_accuracy": 0.0,
+                "vowel_accuracy": 0.0,
+                "mispronounced_words": [],
+                "notes": f"Failed to call audio/text API: {e_audio} | Fallback error: {e_text}"
+            }
+
 
 # ------------------ Pipeline ------------------
 
