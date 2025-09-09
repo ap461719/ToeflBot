@@ -1,48 +1,53 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-Speech & Repetition Metrics from Audio + Reference Text
+Speech, Fluency & Pronunciation Metrics from Audio + Reference Text
 
 This script computes:
   1) Duration (seconds) and speech rate (words per minute)
   2) Repetition accuracy (precision/recall/F1 vs. the provided reference text)
-  3) Pause statistics (#pauses, pauses/min, avg/median pause length)
+  3) Pause statistics (#pauses, pauses/min, avg/median pause length, total pause time)
+  4) Pronunciation metrics using GPT-4o audio:
+       - Mispronunciation accuracy
+       - Vowel accuracy
+       - Frequency (pitch stats)
+       - Amplitude (loudness stats)
 
-It prefers word-level timestamps (WhisperX). If unavailable, it falls back
-to segment-level timestamps (Whisper or faster-whisper).
-
-Usage:
-  python speech_metrics.py --audio demo.wav --text "Hello world ..." \
-      --model whisperx --pause-threshold 0.35
-
-Recommended installs:
-  pip install torch --index-url https://download.pytorch.org/whl/cu121   # if you have CUDA 12.1
-  pip install whisperx jiwer librosa soundfile faster-whisper
+Requires:
+  pip install openai torch whisperx faster-whisper jiwer librosa soundfile numpy pyloudnorm
 """
 
 import argparse
-import math
+import base64
+import json
 import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 
-# -------------- Utilities --------------
+import numpy as np
+import soundfile as sf
+import librosa
+
+try:
+    import pyloudnorm as pyln
+except ImportError:
+    pyln = None
+
+from dotenv import load_dotenv
+load_dotenv()
+# ------------------ Utility functions ------------------
+
 def normalize_text(s: str) -> str:
-    """Lowercase, remove most punctuation, collapse whitespace.
-    Keep apostrophes to help with contractions."""
     s = s.lower()
-    s = re.sub(r"[^\w\s']", " ", s)   # remove punctuation except apostrophes
+    s = re.sub(r"[^\w\s']", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 def tokenize_words(s: str) -> List[str]:
     s = normalize_text(s)
-    if not s:
-        return []
-    return s.split()
+    return s.split() if s else []
 
 @dataclass
 class WordStamp:
@@ -54,28 +59,23 @@ class WordStamp:
 class Transcription:
     text: str
     duration_s: float
-    segments: List[Tuple[float, float, str]]  # (start, end, text)
+    segments: List[Tuple[float, float, str]]
     words: Optional[List[WordStamp]] = None
 
-# -------------- Transcription --------------
-def transcribe_with_whisperx(audio_path: str, device: Optional[str] = None) -> Transcription:
-    """Transcribe & align with WhisperX for word-level timestamps.
-    Requires: whisperx, torch, soundfile or torchaudio."""
-    import torch
-    import whisperx
+# ------------------ Transcription ------------------
 
+def transcribe_with_whisperx(audio_path: str, device: Optional[str] = None) -> Transcription:
+    import torch, whisperx
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load audio and duration
-    import soundfile as sf
     with sf.SoundFile(audio_path) as f:
         duration_s = len(f) / f.samplerate
 
-    # Transcribe (ASR)
-    model = whisperx.load_model("small", device)
+    #model = whisperx.load_model("small", device)
+    model = whisperx.load_model("small", device, compute_type="int8")
     audio = whisperx.load_audio(audio_path)
     result = model.transcribe(audio)
-    # Align to get word timestamps
+
     model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=device)
     aligned = whisperx.align(result["segments"], model_a, metadata, audio, device)
 
@@ -83,251 +83,185 @@ def transcribe_with_whisperx(audio_path: str, device: Optional[str] = None) -> T
     words = []
     for seg in aligned["segments"]:
         for w in seg.get("words", []):
-            # whisperx may include punctuation tokens; filter to alnum words+apostrophes
             if "word" in w:
                 token = re.sub(r"[^\w\s']", "", w["word"].lower()).strip()
                 if token:
                     words.append(WordStamp(token, float(w["start"]), float(w["end"])))
 
     full_text = " ".join([t for _, _, t in segments]).strip()
-    return Transcription(text=full_text, duration_s=duration_s, segments=segments, words=words)
+    return Transcription(full_text, duration_s, segments, words)
 
-def transcribe_with_faster_whisper(audio_path: str, device: Optional[str] = None) -> Transcription:
-    """Transcribe with faster-whisper. It can produce word timestamps if enable_word_timestamps=True.
-    Requires: faster-whisper, soundfile."""
-    from faster_whisper import WhisperModel
-    import soundfile as sf
+# ------------------ Metrics: Fluency ------------------
 
-    with sf.SoundFile(audio_path) as f:
-        duration_s = len(f) / f.samplerate
-
-    model = WhisperModel("small", device=device or "auto")
-    segments, info = model.transcribe(audio_path, word_timestamps=True)
-
-    segs = []
-    words: List[WordStamp] = []
-    full_text_parts = []
-    for seg in segments:
-        segs.append((seg.start, seg.end, seg.text))
-        full_text_parts.append(seg.text)
-        if seg.words:
-            for w in seg.words:
-                token = re.sub(r"[^\w\s']", "", w.word.lower()).strip()
-                if token:
-                    words.append(WordStamp(token, float(w.start), float(w.end)))
-
-    full_text = " ".join(full_text_parts).strip()
-    return Transcription(text=full_text, duration_s=duration_s, segments=segs, words=words or None)
-
-# -------------- Metrics --------------
-def compute_duration_and_rate(trans: Transcription, reference_text: Optional[str]) -> Dict[str, float]:
-    # Speech rate can be computed on spoken words (ASR tokens) or reference words.
-    # We'll report both.
+def compute_duration_and_rate(trans: Transcription, reference_text: str) -> Dict[str, float]:
     spoken_words = tokenize_words(trans.text)
-    ref_words = tokenize_words(reference_text or "")
+    ref_words = tokenize_words(reference_text)
 
     minutes = max(trans.duration_s / 60.0, 1e-9)
-    wpm_spoken = len(spoken_words) / minutes if spoken_words else 0.0
-    wpm_reference = len(ref_words) / minutes if ref_words else 0.0
     return {
         "duration_s": trans.duration_s,
-        "words_spoken": float(len(spoken_words)),
-        "words_in_reference": float(len(ref_words)),
-        "speech_rate_wpm_spoken": wpm_spoken,
-        "speech_rate_wpm_reference": wpm_reference,
+        "words_spoken": len(spoken_words),
+        "words_in_reference": len(ref_words),
+        "speech_rate_wpm_spoken": len(spoken_words) / minutes if spoken_words else 0.0,
+        "speech_rate_wpm_reference": len(ref_words) / minutes if ref_words else 0.0,
     }
 
 def align_and_repetition_metrics(reference_text: str, hypothesis_text: str) -> Dict[str, float]:
-    """Use jiwer to compute alignment-based metrics.
-    Our "repetition accuracy" focuses on how much of the reference was covered (recall).
-      - recall = 1 - deletion_rate
-      - precision ~ 1 - insertion_rate (extra words not in reference)
-      - F1 as harmonic mean of precision/recall"""
     from jiwer import compute_measures
+    ref, hyp = normalize_text(reference_text), normalize_text(hypothesis_text)
+    m = compute_measures(ref, hyp)
 
-    ref = normalize_text(reference_text)
-    hyp = normalize_text(hypothesis_text)
-    measures = compute_measures(ref, hyp)  # dict with insertions, deletions, substitutions, hits, etc.
+    r, h = m["reference length"], m["hypothesis length"]
+    ins, dels, subs = m["insertions"], m["deletions"], m["substitutions"]
+    hits = max(0, r - dels - subs)
 
-    # Words counts
-    r = measures["reference length"]
-    h = measures["hypothesis length"]
-    ins = measures["insertions"]
-    dels = measures["deletions"]
-    subs = measures["substitutions"]
-    hits = measures.get("hits", max(0, r - dels - subs))
-
-    # Define precision/recall/F1 on word boundaries
-    recall = (hits / r) if r > 0 else 0.0
-    precision = (hits / h) if h > 0 else 0.0
-    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+    recall = hits / r if r > 0 else 0.0
+    precision = hits / h if h > 0 else 0.0
+    f1 = (2*precision*recall / (precision+recall)) if (precision+recall) > 0 else 0.0
 
     return {
-        "wer": measures["wer"],
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "insertions": float(ins),
-        "deletions": float(dels),
-        "substitutions": float(subs),
-        "hits": float(hits),
-        "ref_len": float(r),
-        "hyp_len": float(h),
+        "wer": m["wer"], "precision": precision, "recall": recall, "f1": f1,
+        "insertions": ins, "deletions": dels, "substitutions": subs, "hits": hits,
+        "ref_len": r, "hyp_len": h,
     }
 
-def compute_pauses_from_words(words: List[WordStamp], pause_threshold: float = 0.35) -> Dict[str, float]:
-    """Count pauses as gaps >= pause_threshold between consecutive words.
-    Also compute mean/median pause length and pauses per minute."""
-    if not words or len(words) < 2:
-        return {
-            "pause_count": 0.0,
-            "pauses_per_min": 0.0,
-            "avg_pause_s": 0.0,
-            "median_pause_s": 0.0,
-            "total_pause_time_s": 0.0,
-        }
+def compute_pauses(words: Optional[List[WordStamp]], segments: List[Tuple[float, float, str]], duration_s: float, pause_threshold: float=0.35) -> Dict[str, float]:
     gaps = []
-    for i in range(1, len(words)):
-        gap = max(0.0, words[i].start - words[i-1].end)
-        if gap >= pause_threshold:
-            gaps.append(gap)
-
-    if not gaps:
-        return {
-            "pause_count": 0.0,
-            "pauses_per_min": 0.0,
-            "avg_pause_s": 0.0,
-            "median_pause_s": 0.0,
-            "total_pause_time_s": 0.0,
-        }
-
-    gaps_sorted = sorted(gaps)
-    avg_gap = sum(gaps_sorted) / len(gaps_sorted)
-    mid = len(gaps_sorted) // 2
-    if len(gaps_sorted) % 2 == 0:
-        median_gap = 0.5 * (gaps_sorted[mid-1] + gaps_sorted[mid])
+    if words and len(words) >= 2:
+        for i in range(1, len(words)):
+            gap = max(0.0, words[i].start - words[i-1].end)
+            if gap >= pause_threshold: gaps.append(gap)
     else:
-        median_gap = gaps_sorted[mid]
+        segments = sorted(segments, key=lambda x: x[0])
+        for i in range(1, len(segments)):
+            gap = max(0.0, segments[i][0] - segments[i-1][1])
+            if gap >= max(0.5, pause_threshold): gaps.append(gap)
 
-    total_pause_time = sum(gaps_sorted)
+    minutes = max(duration_s / 60.0, 1e-9)
     return {
-        "pause_count": float(len(gaps_sorted)),
-        "avg_pause_s": float(avg_gap),
-        "median_pause_s": float(median_gap),
-        "total_pause_time_s": float(total_pause_time),
+        "pause_count": len(gaps),
+        "pauses_per_min": len(gaps) / minutes,
+        "avg_pause_s": float(np.mean(gaps)) if gaps else 0.0,
+        "median_pause_s": float(np.median(gaps)) if gaps else 0.0,
+        "total_pause_time_s": float(np.sum(gaps)) if gaps else 0.0,
     }
 
-def compute_pauses_from_segments(segments: List[Tuple[float, float, str]], pause_threshold: float = 0.5) -> Dict[str, float]:
-    """Fallback: Use inter-segment gaps as pauses."""
-    if not segments or len(segments) < 2:
-        return {
-            "pause_count": 0.0,
-            "pauses_per_min": 0.0,
-            "avg_pause_s": 0.0,
-            "median_pause_s": 0.0,
-            "total_pause_time_s": 0.0,
-        }
-    # Sort by start time
-    segments = sorted(segments, key=lambda x: x[0])
-    gaps = []
-    for i in range(1, len(segments)):
-        prev_end = segments[i-1][1]
-        cur_start = segments[i][0]
-        gap = max(0.0, cur_start - prev_end)
-        if gap >= pause_threshold:
-            gaps.append(gap)
-    if not gaps:
-        return {
-            "pause_count": 0.0,
-            "pauses_per_min": 0.0,
-            "avg_pause_s": 0.0,
-            "median_pause_s": 0.0,
-            "total_pause_time_s": 0.0,
-        }
-    gaps_sorted = sorted(gaps)
-    avg_gap = sum(gaps_sorted) / len(gaps_sorted)
-    mid = len(gaps_sorted) // 2
-    if len(gaps_sorted) % 2 == 0:
-        median_gap = 0.5 * (gaps_sorted[mid-1] + gaps_sorted[mid])
-    else:
-        median_gap = gaps_sorted[mid]
-    total_pause_time = sum(gaps_sorted)
-    return {
-        "pause_count": float(len(gaps_sorted)),
-        "avg_pause_s": float(avg_gap),
-        "median_pause_s": float(median_gap),
-        "total_pause_time_s": float(total_pause_time),
+# ------------------ DSP: Pitch & Loudness ------------------
+
+def analyze_pitch_and_loudness(audio_path: str, sr: int=16000) -> Dict[str, float]:
+    y, _ = librosa.load(audio_path, sr=sr, mono=True)
+
+    # Pitch
+    f0, _, _ = librosa.pyin(y, fmin=65, fmax=400, sr=sr)
+    voiced = f0[~np.isnan(f0)]
+    pitch_stats = {
+        "pitch_mean_hz": float(np.mean(voiced)) if voiced.size else 0.0,
+        "pitch_range_hz": float(np.max(voiced)-np.min(voiced)) if voiced.size else 0.0,
     }
 
-# -------------- Main pipeline --------------
-def run_pipeline(audio_path: str, reference_text: str, backend: str = "whisperx", pause_threshold: float = 0.35) -> Dict[str, float]:
-    if backend.lower() == "whisperx":
-        trans = transcribe_with_whisperx(audio_path)
-    elif backend.lower() in ("faster-whisper", "faster"):
-        trans = transcribe_with_faster_whisper(audio_path)
-    else:
-        raise ValueError("backend must be one of: whisperx, faster-whisper")
+    # Loudness
+    rms = librosa.feature.rms(y=y)[0]
+    dbfs = 20*np.log10(np.maximum(rms, 1e-9))
+    loud_stats = {
+        "rms_dbfs_mean": float(np.mean(dbfs)),
+        "rms_dbfs_max": float(np.max(dbfs)),
+    }
+    if pyln:
+        meter = pyln.Meter(sr)
+        loud_stats["lufs_integrated"] = float(meter.integrated_loudness(y.astype(np.float64)))
+
+    pitch_stats.update(loud_stats)
+    return pitch_stats
+
+# ------------------ GPT-4o Audio Evaluation ------------------
+
+def gpt4o_pronunciation_eval(reference_text: str, audio_path: str, feats: Dict[str, float], model="gpt-4o-mini-transcribe") -> Dict:
+    from openai import OpenAI
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+    with open(audio_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    ext = os.path.splitext(audio_path)[1].lstrip(".") or "wav"
+
+    system_msg = (
+        "You are a pronunciation examiner. Given reference text, audio, and acoustic features, "
+        "return JSON with mispronunciation_accuracy, vowel_accuracy, mispronounced_words[], notes."
+    )
+    user_msg = "REFERENCE:\n" + reference_text + "\n\nFEATURES:\n" + json.dumps(feats, indent=2)
+
+    resp = client.chat.completions.create(
+        model=model,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": user_msg},
+                {"type": "input_audio", "input_audio": {"data": b64, "format": ext}}
+            ]}
+        ],
+        temperature=0.0,
+    )
+    return json.loads(resp.choices[0].message.content)
+
+# ------------------ Pipeline ------------------
+
+def run_pipeline(audio: str, text: str, model: str="whisperx", pause_threshold: float=0.35) -> Dict:
+    trans = transcribe_with_whisperx(audio)  # only whisperx here for simplicity
 
     metrics = {}
+    metrics.update(compute_duration_and_rate(trans, text))
+    metrics.update({"rep_"+k:v for k,v in align_and_repetition_metrics(text, trans.text).items()})
+    metrics.update({"pause_"+k:v for k,v in compute_pauses(trans.words, trans.segments, trans.duration_s, pause_threshold).items()})
+    feats = analyze_pitch_and_loudness(audio)
+    gpt_eval = gpt4o_pronunciation_eval(text, audio, feats)
 
-    # Duration & speech rate
-    dr = compute_duration_and_rate(trans, reference_text)
-    metrics.update(dr)
+    metrics.update(feats)
+    metrics.update({
+        "mispronunciation_accuracy": gpt_eval.get("mispronunciation_accuracy", 0.0),
+        "vowel_accuracy": gpt_eval.get("vowel_accuracy", 0.0),
+    })
+    return metrics, trans, gpt_eval
 
-    # Repetition accuracy (alignment-based)
-    rep = align_and_repetition_metrics(reference_text, trans.text)
-    metrics.update({f"rep_{k}": v for k, v in rep.items()})
-
-    # Pauses
-    if trans.words:
-        pauses = compute_pauses_from_words(trans.words, pause_threshold=pause_threshold)
-    else:
-        pauses = compute_pauses_from_segments(trans.segments, pause_threshold=max(0.5, pause_threshold))
-
-    # fill pauses_per_min
-    minutes = max(trans.duration_s / 60.0, 1e-9)
-    pauses["pauses_per_min"] = (pauses["pause_count"] / minutes) if minutes > 0 else 0.0
-    metrics.update({f"pause_{k}": v for k, v in pauses.items()})
-
-    # Convenience: primary headline metrics
-    metrics["headline_speech_rate_wpm"] = dr["speech_rate_wpm_spoken"]
-    metrics["headline_repetition_recall"] = rep["recall"]
-    metrics["headline_pause_count"] = pauses["pause_count"]
-
-    return metrics, trans
+# ------------------ Main ------------------
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--audio", required=True, help="Path to audio file (wav/m4a/mp3).")
-    ap.add_argument("--text", required=True, help="Reference text to be spoken.")
-    ap.add_argument("--model", default="whisperx", choices=["whisperx", "faster-whisper"], help="ASR backend.")
-    ap.add_argument("--pause-threshold", type=float, default=0.35, help="Seconds between words to count as a pause.")
+    ap.add_argument("--audio", required=True)
+    ap.add_argument("--text", required=True)
+    ap.add_argument("--pause-threshold", type=float, default=0.35)
     args = ap.parse_args()
 
-    metrics, trans = run_pipeline(args.audio, args.text, backend=args.model, pause_threshold=args.pause_threshold)
+    metrics, trans, gpt_eval = run_pipeline(args.audio, args.text, pause_threshold=args.pause_threshold)
 
-    # Pretty print results
     print("\n=== Speech Metrics ===")
     print(f"Duration: {metrics['duration_s']:.2f} s")
     print(f"Speech rate (spoken): {metrics['speech_rate_wpm_spoken']:.1f} wpm")
     print(f"Speech rate (reference): {metrics['speech_rate_wpm_reference']:.1f} wpm")
-    print(f"Words spoken: {int(metrics['words_spoken'])} | Words in reference: {int(metrics['words_in_reference'])}")
+    print(f"Words spoken: {metrics['words_spoken']} | Words in reference: {metrics['words_in_reference']}")
 
-    print("\n=== Repetition Accuracy (vs. reference) ===")
+    print("\n=== Repetition Accuracy ===")
     print(f"WER: {metrics['rep_wer']:.3f}")
     print(f"Precision: {metrics['rep_precision']:.3f} | Recall: {metrics['rep_recall']:.3f} | F1: {metrics['rep_f1']:.3f}")
-    print(f"Insertions: {int(metrics['rep_insertions'])} | Deletions: {int(metrics['rep_deletions'])} | Substitutions: {int(metrics['rep_substitutions'])} | Hits: {int(metrics['rep_hits'])}")
 
     print("\n=== Pauses ===")
-    print(f"Pause count: {int(metrics['pause_pause_count'])} | Pauses/min: {metrics['pause_pauses_per_min']:.2f}")
+    print(f"Pause count: {metrics['pause_pause_count']} | Pauses/min: {metrics['pause_pauses_per_min']:.2f}")
     print(f"Avg pause: {metrics['pause_avg_pause_s']:.2f} s | Median pause: {metrics['pause_median_pause_s']:.2f} s")
     print(f"Total pause time: {metrics['pause_total_pause_time_s']:.2f} s")
 
-    print("\n=== Notes ===")
-    if trans.words is None:
-        print("* Word-level timestamps not available; pause stats use segment gaps (coarser).")
-    else:
-        print("* Word-level timestamps used for pause stats.")
+    print("\n=== Pronunciation Metrics (GPT-4o Audio) ===")
+    print(f"Mispronunciation accuracy: {metrics['mispronunciation_accuracy']}")
+    print(f"Vowel accuracy: {metrics['vowel_accuracy']}")
+    print(f"Pitch mean: {metrics['pitch_mean_hz']:.1f} Hz | Range: {metrics['pitch_range_hz']:.1f} Hz")
+    print(f"Loudness (RMS mean): {metrics['rms_dbfs_mean']:.1f} dB | Max: {metrics['rms_dbfs_max']:.1f} dB")
+    if "lufs_integrated" in metrics:
+        print(f"Integrated LUFS: {metrics['lufs_integrated']:.1f}")
+
+    if gpt_eval.get("mispronounced_words"):
+        print("Mispronounced words:")
+        for item in gpt_eval["mispronounced_words"]:
+            print(f"  - {item.get('word')}: {item.get('reason')}")
+    if gpt_eval.get("notes"):
+        print("Notes:", gpt_eval["notes"])
 
 if __name__ == "__main__":
     main()
