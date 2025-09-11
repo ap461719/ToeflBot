@@ -209,30 +209,27 @@ def gpt4o_pronunciation_eval(
     reference_text: str,
     audio_path: str,
     feats: Dict[str, float],
-    model: str = "gpt-4o-audio-preview"  # or "gpt-4o-audio-mini" if your account has that
+    model: str = "gpt-4o-audio-preview-2025-06-03"  
 ) -> Dict:
-    """
-    Send reference text + audio to GPT-4o Audio via the Responses API using
-    input_audio (base64) and input_text blocks. Returns parsed JSON.
-    Falls back to text-only judging if audio input is not allowed.
-    """
     import base64, json, os
     from openai import OpenAI
+
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
     # Read & base64 the audio
     with open(audio_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    # Choose a format the API recognizes
     ext = (os.path.splitext(audio_path)[1].lstrip(".") or "wav").lower()
-    # Map common extensions to what the API expects
     if ext == "m4a":
-        fmt = "aac"   # m4a container typically AAC codec; the API accepts "aac"
+        fmt = "aac"
     elif ext in {"wav", "mp3", "aac", "flac", "ogg", "webm"}:
         fmt = ext
     else:
         fmt = "wav"
 
-    system_instructions = (
+    instructions = (
         "You are a careful pronunciation examiner. "
         "Given reference text, the user's spoken audio, and acoustic features, "
         "respond ONLY in compact JSON with keys: "
@@ -244,53 +241,63 @@ def gpt4o_pronunciation_eval(
         "ACOUSTIC FEATURES (json):\n" + json.dumps(feats, indent=2)
     )
 
-    # Try audio+text via Responses API
+    def _parse_output_to_json(resp):
+        # Collect all text blocks from the response
+        chunks = []
+        for block in getattr(resp, "output", []) or []:
+            for c in getattr(block, "content", []) or []:
+                t = getattr(c, "type", None)
+                if t in ("output_text", "text"):
+                    chunks.append(getattr(c, "text", ""))
+        text = "\n".join(chunks).strip()
+        return json.loads(text) if text else {}
+
+    # Try audio + text
     try:
         resp = client.responses.create(
             model=model,
-            response_format={"type": "json_object"},
+            instructions=instructions,
             input=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": system_instructions + "\n\n" + user_payload},
+                    {"type": "input_text", "text": user_payload},
                     {"type": "input_audio", "audio": {"data": b64, "format": fmt}}
                 ]
-            }]
+            }],
         )
-        # Parse JSON string from the first text output
-        content = resp.output[0].content[0].text
-        return json.loads(content)
+        data = _parse_output_to_json(resp)
+        if not data:
+            raise RuntimeError("Empty output_text from model.")
+        return data
 
     except Exception as e_audio:
-        # Fallback: text-only judging (no audio), so your run still completes
+        # Fallback: text-only judging
         try:
             resp2 = client.responses.create(
                 model="gpt-4o-mini",
-                response_format={"type": "json_object"},
+                instructions=instructions,
                 input=[{
                     "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": (
-                            system_instructions + "\n\n" + user_payload +
-                            "\n\nNOTE: Audio block could not be processed (" + str(e_audio) +
-                            "). Estimate based on text and features only."
-                        )
-                    }]
-                }]
+                    "content": [
+                        {"type": "input_text", "text": user_payload + f"\n\nNOTE: Audio unavailable ({e_audio}). Score based on text+features only."}
+                    ]
+                }],
             )
-            content2 = resp2.output[0].content[0].text
-            data = json.loads(content2)
-            data.setdefault("notes", "")
-            data["notes"] = (data["notes"] + " (text-only fallback used)").strip()
-            return data
+            data2 = _parse_output_to_json(resp2) or {}
+            data2.setdefault("mispronunciation_accuracy", 0.0)
+            data2.setdefault("vowel_accuracy", 0.0)
+            data2.setdefault("mispronounced_words", [])
+            data2["notes"] = (data2.get("notes", "") + " (text-only fallback used)").strip()
+            return data2
         except Exception as e_text:
             return {
                 "mispronunciation_accuracy": 0.0,
                 "vowel_accuracy": 0.0,
                 "mispronounced_words": [],
-                "notes": f"Failed to call audio/text API: {e_audio} | Fallback error: {e_text}"
+                "notes": f"Audio scoring failed: {e_audio}. Text-only fallback also failed: {e_text}. Returned zeros so the run can complete."
             }
+
+
 
 
 # ------------------ Pipeline ------------------
