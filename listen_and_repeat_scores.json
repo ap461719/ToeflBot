@@ -1,0 +1,40 @@
+{
+  "audio": "experiments/my_recording.wav",
+  "reference_text": "Good communication is one of the most important skills you can develop.\nEvery day, we use words to share ideas, express feelings, and connect with the people around us. When we communicate clearly, others are more likely to understand what we mean and respond in a positive way.\n\nBut good communication is not only about speaking. It is also about listening carefully. When you listen closely to another person, you show respect and interest in their thoughts. This can strengthen relationships and help avoid unnecessary conflicts.\n\nAnother important part of communication is body language. Even if we do not realize it, our facial expressions, gestures, and posture send strong signals. A smile can make us seem friendly, while crossed arms might make us appear closed off.\n\nTo improve your communication, practice slowing down your speech and pronouncing words clearly. Think about your audience and choose words that fit the situation. If you are speaking to children, for example, you might use simpler language than when speaking to a group of professionals.\n\nFinally, remember that communication is a skill you can always improve. With practice, patience, and a willingness to learn, you can become a more effective communicator. This will benefit you not only in your personal relationships but also in your studies and your career.",
+  "metrics": {
+    "duration_s": 112.1693125,
+    "words_spoken": 215,
+    "words_in_reference": 215,
+    "speech_rate_wpm_spoken": 115.00471664208516,
+    "speech_rate_wpm_reference": 115.00471664208516,
+    "rep_wer": 0.08837209302325581,
+    "rep_precision": 0.9302325581395349,
+    "rep_recall": 0.9302325581395349,
+    "rep_f1": 0.9302325581395349,
+    "rep_insertions": 4.0,
+    "rep_deletions": 4.0,
+    "rep_substitutions": 11.0,
+    "rep_hits": 200.0,
+    "rep_ref_len": 215.0,
+    "rep_hyp_len": 215.0,
+    "pause_pause_count": 35,
+    "pause_pauses_per_min": 18.72169805801386,
+    "pause_avg_pause_s": 0.9219428571428582,
+    "pause_median_pause_s": 0.7010000000000005,
+    "pause_total_pause_time_s": 32.268000000000036,
+    "pitch_mean_hz": 105.11967889429098,
+    "pitch_range_hz": 215.52802959753046,
+    "rms_dbfs_mean": -43.574737548828125,
+    "rms_dbfs_max": -31.35257911682129,
+    "lufs_integrated": -42.65563228270287,
+    "mispronunciation_accuracy": 0.0,
+    "vowel_accuracy": 0.0
+  },
+  "gpt_pronunciation_eval": {
+    "mispronunciation_accuracy": 0.0,
+    "vowel_accuracy": 0.0,
+    "mispronounced_words": [],
+    "notes": "Audio scoring failed: Error code: 400 - {'error': {'message': \"Invalid value: 'input_audio'. Supported values are: 'input_text', 'input_image', 'output_text', 'refusal', 'input_file', 'computer_screenshot', and 'summary_text'.\", 'type': 'invalid_request_error', 'param': 'input[0].content[1].type', 'code': 'invalid_value'}}. Text-only fallback also failed: Expecting value: line 1 column 1 (char 0). Returned zeros so the run can complete."
+  },
+  "transcript": "Good communication is one of the most important skills you can develop. Every day we use words  to share ideas, express feelings, and connect with people around us. When we communicate clearly, others are more likely to understand what we mean and respond in a positive way. But communication is not only about speaking but it is about listening carefully.  When you listen closely to another person, you show respect and interest in their thoughts. This can strengthen relationships and help avoid unnecessary conflicts. Another important part of communication is body language.  Even if you do not realize it, our facial expressions, gestures, and postures are strong signals. A smile can make us seem friendly, while crossed arms might make us appear close to us. To improve your communication, practice lowering down your speech and pronouncing words clearly,  Think about your audience and choose where such a good situation is. If you're speaking to children, for example, you might use simpler language than when speaking to a group of professionals. Finally, remember that communication is a skill you can always improve.  With practice, patience, and a willingness to learn, you can become a more effective communicator. This will benefit you not only in your personal relationships, but also in your studies and in your career."
+}

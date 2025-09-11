@@ -49,6 +49,18 @@ def tokenize_words(s: str) -> List[str]:
     s = normalize_text(s)
     return s.split() if s else []
 
+# add near the top
+def load_reference_text(s: str) -> str:
+    # If it looks like a file on disk, read it; otherwise treat as raw text
+    try:
+        if os.path.isfile(s):
+            with open(s, "r", encoding="utf-8") as f:
+                return f.read()
+    except Exception:
+        pass
+    return s
+
+
 @dataclass
 class WordStamp:
     word: str
@@ -324,11 +336,26 @@ def run_pipeline(audio: str, text: str, model: str="whisperx", pause_threshold: 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--audio", required=True)
-    ap.add_argument("--text", required=True)
+    ap.add_argument("--text", required=True, help="Either the reference text itself OR a path to a .txt file")
     ap.add_argument("--pause-threshold", type=float, default=0.35)
     args = ap.parse_args()
 
-    metrics, trans, gpt_eval = run_pipeline(args.audio, args.text, pause_threshold=args.pause_threshold)
+    reference_text = load_reference_text(args.text)
+
+    metrics, trans, gpt_eval = run_pipeline(args.audio, reference_text, pause_threshold=args.pause_threshold)
+
+    out = {
+        "audio": args.audio,
+        "reference_text": reference_text,   # <- save the actual text, not the path
+        "metrics": metrics,
+        "gpt_pronunciation_eval": gpt_eval,
+        "transcript": trans.text,
+    }
+
+    with open("listen_and_repeat_scores.json", "w") as f:
+        json.dump(out, f, indent=2)
+
+    print("\nSaved: listen_and_repeat_scores.json")
 
     print("\n=== Speech Metrics ===")
     print(f"Duration: {metrics['duration_s']:.2f} s")
