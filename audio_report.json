@@ -1,0 +1,128 @@
+{
+  "files": [
+    "experiments/interview_speech/part2.wav",
+    "experiments/interview_speech/part3.wav",
+    "experiments/interview_speech/part4.wav",
+    "experiments/interview_speech/part5.wav",
+    "experiments/interview_speech/part6.wav"
+  ],
+  "per_file": [
+    {
+      "file": "experiments/interview_speech/part2.wav",
+      "metrics": {
+        "duration_s": 9.22,
+        "words_spoken": 18,
+        "speech_rate_wpm": 117.14,
+        "pause_count": 0,
+        "pauses_per_min": 0.0,
+        "avg_pause_s": 0.0,
+        "median_pause_s": 0.0,
+        "total_pause_time_s": 0
+      },
+      "scores": {
+        "speech_rate_score": 1.0,
+        "pauses_per_min_score": 0.0,
+        "avg_pause_score": 0.0,
+        "audio_score": 0.333
+      },
+      "transcript": "My favorite book is Harry Potter. This is because we learn a lot about friendships from that book."
+    },
+    {
+      "file": "experiments/interview_speech/part3.wav",
+      "metrics": {
+        "duration_s": 9.48,
+        "words_spoken": 15,
+        "speech_rate_wpm": 94.94,
+        "pause_count": 1,
+        "pauses_per_min": 6.33,
+        "avg_pause_s": 1.68,
+        "median_pause_s": 1.68,
+        "total_pause_time_s": 1.68
+      },
+      "scores": {
+        "speech_rate_score": 0.498,
+        "pauses_per_min_score": 1.0,
+        "avg_pause_score": 0.631,
+        "audio_score": 0.71
+      },
+      "transcript": "All of the friends were very loyal and they cared for each other a lot."
+    },
+    {
+      "file": "experiments/interview_speech/part4.wav",
+      "metrics": {
+        "duration_s": 14.62,
+        "words_spoken": 22,
+        "speech_rate_wpm": 90.29,
+        "pause_count": 1,
+        "pauses_per_min": 4.1,
+        "avg_pause_s": 0.96,
+        "median_pause_s": 0.96,
+        "total_pause_time_s": 0.96
+      },
+      "scores": {
+        "speech_rate_score": 0.343,
+        "pauses_per_min_score": 0.821,
+        "avg_pause_score": 1.0,
+        "audio_score": 0.721
+      },
+      "transcript": "So, I believe that they have each other's backs all throughout the story, so the difficult times definitely felt easier for them."
+    },
+    {
+      "file": "experiments/interview_speech/part5.wav",
+      "metrics": {
+        "duration_s": 11.86,
+        "words_spoken": 19,
+        "speech_rate_wpm": 96.12,
+        "pause_count": 1,
+        "pauses_per_min": 5.06,
+        "avg_pause_s": 1.12,
+        "median_pause_s": 1.12,
+        "total_pause_time_s": 1.12
+      },
+      "scores": {
+        "speech_rate_score": 0.537,
+        "pauses_per_min_score": 1.0,
+        "avg_pause_score": 1.0,
+        "audio_score": 0.846
+      },
+      "transcript": "In the end of the book, they were able to defeat the evil because they worked in a team."
+    },
+    {
+      "file": "experiments/interview_speech/part6.wav",
+      "metrics": {
+        "duration_s": 12.78,
+        "words_spoken": 24,
+        "speech_rate_wpm": 112.68,
+        "pause_count": 1,
+        "pauses_per_min": 4.69,
+        "avg_pause_s": 1.08,
+        "median_pause_s": 1.08,
+        "total_pause_time_s": 1.08
+      },
+      "scores": {
+        "speech_rate_score": 1.0,
+        "pauses_per_min_score": 0.939,
+        "avg_pause_score": 1.0,
+        "audio_score": 0.98
+      },
+      "transcript": "All of them were not afraid to stand up against the villain of the book and I believe that it's something everyone should practice."
+    }
+  ],
+  "aggregate": {
+    "metrics": {
+      "duration_s": 57.96,
+      "words_spoken": 98,
+      "speech_rate_wpm": 101.45,
+      "pause_count": 4,
+      "pauses_per_min": 4.14,
+      "avg_pause_s": 0.97
+    },
+    "scores": {
+      "audio_score": 0.848,
+      "speech_rate_score": 0.715,
+      "pauses_per_min_score": 0.828,
+      "avg_pause_score": 1.0
+    }
+  },
+  "transcript": "My favorite book is Harry Potter. This is because we learn a lot about friendships from that book.\nAll of the friends were very loyal and they cared for each other a lot.\nSo, I believe that they have each other's backs all throughout the story, so the difficult times definitely felt easier for them.\nIn the end of the book, they were able to defeat the evil because they worked in a team.\nAll of them were not afraid to stand up against the villain of the book and I believe that it's something everyone should practice."
+}

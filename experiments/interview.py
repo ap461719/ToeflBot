@@ -22,6 +22,13 @@ INTERVIEWER_SYS = """You are a rigorous interviewer.
 EMBEDDING_MODEL = "text-embedding-3-small"   # cheap + solid for relevance
 DEFAULT_CHAT_MODEL = "gpt-4o-mini"           # interviewer + grammar judging
 
+
+def _attr(obj, name, default=None):
+    """Return attribute `name` if present; if obj is a dict, fallback to dict.get."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
 # -------- Helpers --------
 def cosine_sim(a: List[float], b: List[float]) -> float:
     dot = sum(x*y for x,y in zip(a,b))
@@ -33,6 +40,199 @@ def cosine_sim(a: List[float], b: List[float]) -> float:
 
 def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
+
+
+
+#NEW HELPERS
+# -------- Audio analysis (Whisper) --------
+from pathlib import Path
+from statistics import median
+
+WHISPER_MODEL = "whisper-1"   # OpenAI STT
+
+def _linear_band_score(x, ideal_min, ideal_max, hard_min, hard_max) -> float:
+    """
+    Score in [0..1]. 1.0 inside [ideal_min..ideal_max].
+    Linearly decays to 0.0 at hard_min / hard_max, clipped outside.
+    """
+    if x <= hard_min or x >= hard_max:
+        return 0.0
+    if x < ideal_min:
+        return (x - hard_min) / (ideal_min - hard_min)
+    if x > ideal_max:
+        return (hard_max - x) / (hard_max - ideal_max)
+    return 1.0
+
+def transcribe_and_analyze_audio_folder(
+    client: OpenAI,
+    audio_dir: str,
+    pause_gap_s: float = 0.35,   # gaps >= this are pauses
+) -> dict:
+    """
+    Transcribe all .wav in `audio_dir` and compute per-file and aggregate metrics.
+    Returns:
+      {
+        "files": [...],
+        "per_file": [{file, metrics, scores, transcript}, ...],
+        "aggregate": {"metrics": {...}, "scores": {...}},
+        "transcript": "<all files concatenated>"
+      }
+    """
+    p = Path(audio_dir)
+    wavs = sorted(p.glob("*.wav"))
+    if not wavs:
+        raise FileNotFoundError(f"No .wav files found in {audio_dir}")
+
+    all_text = []
+    per_file = []
+
+    # --- helpers reused inside ---
+    def _linear_band_score(x, ideal_min, ideal_max, hard_min, hard_max) -> float:
+        if x <= hard_min or x >= hard_max:
+            return 0.0
+        if x < ideal_min:
+            return (x - hard_min) / (ideal_min - hard_min)
+        if x > ideal_max:
+            return (hard_max - x) / (hard_max - ideal_max)
+        return 1.0
+
+    for wav in wavs:
+        with open(wav, "rb") as f:
+            # Prefer verbose_json + timestamps
+            try:
+                tr = client.audio.transcriptions.create(
+                    model=WHISPER_MODEL,
+                    file=f,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment", "word"],
+                )
+                segments = tr.segments or []
+                text = tr.text or ""
+            except Exception:
+                f.seek(0)
+                tr = client.audio.transcriptions.create(model=WHISPER_MODEL, file=f)
+                segments = []
+                text = tr.text or ""
+
+        all_text.append(text)
+
+        # ----- word count (robust) -----
+        words_spoken = 0
+        wlist = getattr(tr, "words", None)
+        if wlist:
+            words_spoken = len(wlist)
+        else:
+            seg_word_total = 0
+            for seg in segments:
+                seg_words = _attr(seg, "words", None)
+                if seg_words:
+                    try:
+                        seg_word_total += len(seg_words)
+                    except TypeError:
+                        seg_word_total += sum(1 for _ in seg_words)
+            words_spoken = seg_word_total if seg_word_total else len(text.split())
+
+        # ----- segment timing & pauses -----
+        last_end = 0.0
+        all_gaps = []
+        total_speech_time = 0.0
+
+        for seg in segments:
+            start = float(_attr(seg, "start", 0.0))
+            end = _attr(seg, "end", None)
+            if end is None:
+                dur = float(_attr(seg, "duration", 0.0))
+                end = float(start + max(0.0, dur))
+            else:
+                end = float(end)
+                dur = max(0.0, end - start)
+
+            total_speech_time += dur
+            gap = start - last_end
+            if gap >= pause_gap_s:
+                all_gaps.append(gap)
+            last_end = end
+
+        # file duration = last segment end (or rough fallback)
+        if segments:
+            duration_s = float(_attr(segments[-1], "end", _attr(segments[-1], "start", 0.0)))
+        else:
+            duration_s = max(1.0, len(text.split()) / (160 / 60.0))
+
+        # ----- per-file metrics -----
+        spoken_minutes = max(1e-9, duration_s / 60.0)
+        speech_rate_wpm = words_spoken / spoken_minutes
+        pause_count = len(all_gaps)
+        pauses_per_min = pause_count / spoken_minutes
+        avg_pause = sum(all_gaps) / pause_count if pause_count else 0.0
+        med_pause = median(all_gaps) if pause_count else 0.0
+        total_pause_time = sum(all_gaps)
+
+        # ----- per-file scores -----
+        sr_score = _linear_band_score(speech_rate_wpm, 110, 160, 80, 220)
+        ppm_score = _linear_band_score(pauses_per_min, 5, 15, 0, 30)
+        ap_score = _linear_band_score(avg_pause, 0.3, 1.2, 0.0, 2.5)
+        audio_score = (sr_score + ppm_score + ap_score) / 3.0
+
+        per_file.append({
+            "file": str(wav),
+            "metrics": {
+                "duration_s": round(duration_s, 2),
+                "words_spoken": int(words_spoken),
+                "speech_rate_wpm": round(speech_rate_wpm, 2),
+                "pause_count": pause_count,
+                "pauses_per_min": round(pauses_per_min, 2),
+                "avg_pause_s": round(avg_pause, 2),
+                "median_pause_s": round(med_pause, 2),
+                "total_pause_time_s": round(total_pause_time, 2),
+            },
+            "scores": {
+                "speech_rate_score": round(sr_score, 3),
+                "pauses_per_min_score": round(ppm_score, 3),
+                "avg_pause_score": round(ap_score, 3),
+                "audio_score": round(audio_score, 3),
+            },
+            "transcript": text,
+        })
+
+    # ----- aggregate across files -----
+    total_duration = sum(f["metrics"]["duration_s"] for f in per_file)
+    total_words = sum(f["metrics"]["words_spoken"] for f in per_file)
+    spoken_minutes = max(1e-9, total_duration / 60.0)
+    agg_wpm = total_words / spoken_minutes
+
+    agg_pause_count = sum(f["metrics"]["pause_count"] for f in per_file)
+    agg_pauses_per_min = agg_pause_count / spoken_minutes
+    agg_avg_pause = (sum(f["metrics"]["avg_pause_s"] for f in per_file) / len(per_file)) if per_file else 0.0
+
+    agg_sr_score = _linear_band_score(agg_wpm, 110, 160, 80, 220)
+    agg_ppm_score = _linear_band_score(agg_pauses_per_min, 5, 15, 0, 30)
+    agg_ap_score = _linear_band_score(agg_avg_pause, 0.3, 1.2, 0.0, 2.5)
+    agg_audio_score = (agg_sr_score + agg_ppm_score + agg_ap_score) / 3.0
+
+    return {
+        "files": [str(w) for w in wavs],
+        "per_file": per_file,
+        "aggregate": {
+            "metrics": {
+                "duration_s": round(total_duration, 2),
+                "words_spoken": int(total_words),
+                "speech_rate_wpm": round(agg_wpm, 2),
+                "pause_count": int(agg_pause_count),
+                "pauses_per_min": round(agg_pauses_per_min, 2),
+                "avg_pause_s": round(agg_avg_pause, 2),
+            },
+            "scores": {
+                "audio_score": round(agg_audio_score, 3),
+                "speech_rate_score": round(agg_sr_score, 3),
+                "pauses_per_min_score": round(agg_ppm_score, 3),
+                "avg_pause_score": round(agg_ap_score, 3),
+            },
+        },
+        "transcript": "\n".join(all_text).strip(),
+    }
+
+
 
 @dataclass
 class RoundEval:
@@ -215,15 +415,97 @@ def run_interview(topic: str, rounds: int, model: str, judge_model: str | None =
         json.dump(out, f, indent=2)
     print("\nSaved: interview_report.json")
 
+    # optional: save JSON
+    out = {
+        "topic": topic,
+        "rounds": rounds,
+        "model": model,
+        "judge_model": judge_model,
+        "per_round": [asdict(e) for e in evals],
+        "averages": {
+            "relevance": rel_avg,
+            "grammar": gram_avg,
+            "thinking_time": think_avg,
+            "final_score_text_only": final_score,
+        },
+    }
+
+    # If user provided an audio folder via CLI env/arg, analyze it
+    audio_dir = os.environ.get("INTERVIEW_AUDIO_DIR")  # or wire via argparse, see below
+    if audio_dir and os.path.isdir(audio_dir):
+        print("\nTranscribing + analyzing audio…")
+        audio_result = transcribe_and_analyze_audio_folder(client, audio_dir)
+        m = audio_result["metrics"]
+        s = audio_result["scores"]
+
+        print("\n=== Speech Metrics ===")
+        print(f"Duration: {m['duration_s']} s")
+        print(f"Speech rate (spoken): {m['speech_rate_wpm']} wpm")
+        print(f"Words spoken: {m['words_spoken']}")
+
+        print("\n=== Pauses ===")
+        print(f"Pause count: {m['pause_count']} | Pauses/min: {m['pauses_per_min']}")
+        print(f"Avg pause: {m['avg_pause_s']} s | Median pause: {m['median_pause_s']} s")
+        print(f"Total pause time: {m['total_pause_time_s']} s")
+
+        # Merge audio into report and compute overall score
+        out["audio"] = audio_result
+        final_score_overall = (final_score + s["audio_score"]) / 2.0
+        out["averages"]["final_score_audio_only"] = s["audio_score"]
+        out["averages"]["final_score_overall"] = final_score_overall
+        print(f"\nAUDIO SCORE: {s['audio_score']:.2f}")
+        print(f"OVERALL SCORE (text+audio): {final_score_overall:.2f}")
+    else:
+        print("\n(No audio folder provided. Set INTERVIEW_AUDIO_DIR=/path/to/wavs to analyze.)")
+
+    with open("interview_report.json", "w") as f:
+        json.dump(out, f, indent=2)
+    print("\nSaved: interview_report.json")
+
+
 # -------- CLI --------
 def main():
-    ap = argparse.ArgumentParser(description="AI interviewer (you answer).")
-    ap.add_argument("--topic", required=True, help="Interview topic/focus")
-    ap.add_argument("--rounds", type=int, default=5)
+    ap = argparse.ArgumentParser(description="AI interviewer + audio analysis")
+    ap.add_argument("--topic", required=False, help="Interview topic/focus")
+    ap.add_argument("--rounds", type=int, default=0,
+                    help="How many interview rounds (0 = skip interview)")
     ap.add_argument("--model", default=DEFAULT_CHAT_MODEL, help="chat model for questions")
     ap.add_argument("--judge-model", default=None, help="model to judge grammar (defaults to --model)")
+    ap.add_argument("--audio-dir", default=None, help="Path to folder of .wav files for analysis")
     args = ap.parse_args()
-    run_interview(args.topic, args.rounds, args.model, args.judge_model)
+
+    client = OpenAI()
+
+    # if interview requested
+    if args.rounds > 0 and args.topic:
+        run_interview(args.topic, args.rounds, args.model, args.judge_model)
+
+    # if audio analysis requested
+    if args.audio_dir:
+        print("\n[Audio-only analysis]")
+        audio_result = transcribe_and_analyze_audio_folder(client, args.audio_dir)
+
+        # per-file
+        print("\n=== Per-file scores ===")
+        for f in audio_result["per_file"]:
+            print(f"- {os.path.basename(f['file'])}: score {f['scores']['audio_score']:.2f}  "
+                f"(wpm {f['metrics']['speech_rate_wpm']}, pauses/min {f['metrics']['pauses_per_min']})")
+
+        # aggregate
+        agg_m = audio_result["aggregate"]["metrics"]
+        agg_s = audio_result["aggregate"]["scores"]
+
+        print("\n=== Aggregate ===")
+        print(f"Duration: {agg_m['duration_s']} s | Words: {agg_m['words_spoken']} | WPM: {agg_m['speech_rate_wpm']}")
+        print(f"Pauses/min: {agg_m['pauses_per_min']} | Avg pause: {agg_m['avg_pause_s']} s")
+        print(f"\nAVERAGE AUDIO SCORE: {agg_s['audio_score']:.2f}")
+
+        with open("audio_report.json", "w") as f:
+            json.dump(audio_result, f, indent=2)
+        print("\nSaved: audio_report.json")
+
+
 
 if __name__ == "__main__":
     main()
+
