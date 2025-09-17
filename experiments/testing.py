@@ -215,6 +215,195 @@ def analyze_pitch_and_loudness(audio_path: str, sr: int=16000) -> Dict[str, floa
     pitch_stats.update(loud_stats)
     return pitch_stats
 
+# ========= Grading helpers =========
+
+# --- CEFR mapping (numeric → label) ---
+def cefr_label(score_1to6: float) -> str:
+    # Uses common cut points (with half steps)
+    if score_1to6 >= 6.0: return "C2"
+    if score_1to6 >= 5.5: return "C1"
+    if score_1to6 >= 5.0: return "C1"
+    if score_1to6 >= 4.5: return "B2"
+    if score_1to6 >= 4.0: return "B2"
+    if score_1to6 >= 3.5: return "B1"
+    if score_1to6 >= 3.0: return "B1"
+    if score_1to6 >= 2.5: return "A2"
+    if score_1to6 >= 2.0: return "A2"
+    if score_1to6 >= 1.5: return "A1"
+    return "A1"
+
+# --- New (1–6) to Old TOEFL (0–30) band text ---
+TOEFL_OLD_MAP = {
+    6.0: "29–30",
+    5.5: "27–28",
+    5.0: "24–26",
+    4.5: "22–23",
+    4.0: "18–21",
+    3.5: "12–17",
+    3.0: "6–11",
+    2.5: "4–5",
+    2.0: "3",
+    1.5: "2",
+    1.0: "0–1",
+}
+def old_toefl_band(score_1to6: float) -> str:
+    # round to nearest 0.5 for lookup
+    step = round(score_1to6 * 2) / 2.0
+    # clamp into [1.0, 6.0]
+    step = max(1.0, min(6.0, step))
+    return TOEFL_OLD_MAP.get(step, TOEFL_OLD_MAP[6.0])
+
+# --- Component scorers → New TOEFL (1–6) ---
+def score_speech_rate(wpm: float) -> float:
+    # Ideal conversational English 110–160
+    if 110 <= wpm <= 160: return 6.0
+    if 90  <= wpm < 110 or 160 < wpm <= 180: return 5.0
+    if 75  <= wpm <  90 or 180 < wpm <= 200: return 4.0
+    if 60  <= wpm <  75 or 200 < wpm <= 220: return 3.5
+    if 45  <= wpm <  60: return 3.0
+    return 2.5
+
+def score_duration(seconds: float) -> float:
+    # Aiming for ~90–120s monologue
+    if seconds >= 120: return 6.0
+    if 90 <= seconds < 120: return 5.0
+    if 60 <= seconds <  90: return 4.0
+    if 40 <= seconds <  60: return 3.5
+    if 20 <= seconds <  40: return 3.0
+    return 2.5
+
+def score_repeat_accuracy(f1: float) -> float:
+    # f1 in [0,1]; stricter because this is the core of “listen & repeat”
+    if f1 >= 0.95: return 6.0
+    if f1 >= 0.90: return 5.5
+    if f1 >= 0.85: return 5.0
+    if f1 >= 0.80: return 4.5
+    if f1 >= 0.75: return 4.0
+    if f1 >= 0.65: return 3.5
+    if f1 >= 0.55: return 3.0
+    if f1 >= 0.45: return 2.5
+    return 2.0
+
+def score_pause_frequency(pauses_per_min: float) -> float:
+    # Best when 5–15 pauses/min, decays outside
+    if 5 <= pauses_per_min <= 15: return 6.0
+    if 3 <= pauses_per_min < 5 or 15 < pauses_per_min <= 18: return 5.0
+    if 2 <= pauses_per_min < 3 or 18 < pauses_per_min <= 22: return 4.0
+    if 1 <= pauses_per_min < 2 or 22 < pauses_per_min <= 26: return 3.5
+    if pauses_per_min < 1 or 26 < pauses_per_min <= 30: return 3.0
+    return 2.5
+
+# Optional pronunciation composite (if you want to use it in an overall score)
+def score_pronunciation(mis_acc: float, vowel_acc: float) -> float:
+    # Both inputs are 0..1; map their mean to 1..6
+    mean = max(0.0, min(1.0, (mis_acc + vowel_acc) / 2.0))
+    if mean >= 0.95: return 6.0
+    if mean >= 0.90: return 5.5
+    if mean >= 0.85: return 5.0
+    if mean >= 0.75: return 4.5
+    if mean >= 0.65: return 4.0
+    if mean >= 0.55: return 3.5
+    if mean >= 0.45: return 3.0
+    if mean >= 0.35: return 2.5
+    return 2.0
+
+# --- Build table rows from your metrics dict ---
+def build_grading_table(metrics: dict) -> list[dict]:
+    rows = []
+
+    # Speech rate
+    sr = metrics["speech_rate_wpm_spoken"]
+    sr_score = score_speech_rate(sr)
+    rows.append({
+        "Metric": "Speech rate",
+        "Raw": f"{sr:.0f} wpm",
+        "CEFR": cefr_label(sr_score),
+        "New TOEFL (1–6)": sr_score,
+        "Old TOEFL (0–30)": old_toefl_band(sr_score),
+    })
+
+    # Duration
+    dur = metrics["duration_s"]
+    dur_score = score_duration(dur)
+    rows.append({
+        "Metric": "Duration",
+        "Raw": f"{dur:.0f}s",
+        "CEFR": cefr_label(dur_score),
+        "New TOEFL (1–6)": dur_score,
+        "Old TOEFL (0–30)": old_toefl_band(dur_score),
+    })
+
+    # Repeat accuracy (use F1)
+    f1 = metrics["rep_f1"]
+    rep_score = score_repeat_accuracy(f1)
+    rows.append({
+        "Metric": "Repeat accuracy",
+        "Raw": f"{f1*100:.0f}%",
+        "CEFR": cefr_label(rep_score),
+        "New TOEFL (1–6)": rep_score,
+        "Old TOEFL (0–30)": old_toefl_band(rep_score),
+    })
+
+    # Pause frequency
+    ppm = metrics["pause_pauses_per_min"]
+    pause_score = score_pause_frequency(ppm)
+    rows.append({
+        "Metric": "Pause frequency",
+        "Raw": f"{ppm:.0f} / min",
+        "CEFR": cefr_label(pause_score),
+        "New TOEFL (1–6)": pause_score,
+        "Old TOEFL (0–30)": old_toefl_band(pause_score),
+    })
+
+    # Optional: pronunciation row (if you want it shown)
+    if "mispronunciation_accuracy" in metrics and "vowel_accuracy" in metrics:
+        pr_score = score_pronunciation(metrics["mispronunciation_accuracy"],
+                                       metrics["vowel_accuracy"])
+        raw_txt = f"mis:{metrics['mispronunciation_accuracy']:.2f}, vowel:{metrics['vowel_accuracy']:.2f}"
+        rows.append({
+            "Metric": "Pronunciation (model)",
+            "Raw": raw_txt,
+            "CEFR": cefr_label(pr_score),
+            "New TOEFL (1–6)": pr_score,
+            "Old TOEFL (0–30)": old_toefl_band(pr_score),
+        })
+
+    return rows
+
+# --- Overall score (weighted) ---
+def overall_new_toefl_score(rows: list[dict]) -> float:
+    """
+    Weighted blend of the four main rows:
+      repeat 0.4, speech 0.3, pauses 0.2, duration 0.1
+    (If pronunciation row exists, you can blend it in too.)
+    """
+    by_name = {r["Metric"]: r for r in rows}
+    rep   = by_name["Repeat accuracy"]["New TOEFL (1–6)"]
+    sr    = by_name["Speech rate"]["New TOEFL (1–6)"]
+    pause = by_name["Pause frequency"]["New TOEFL (1–6)"]
+    dur   = by_name["Duration"]["New TOEFL (1–6)"]
+    composite = 0.4*rep + 0.3*sr + 0.2*pause + 0.1*dur
+    return round(composite, 2)
+
+def print_grading_table(rows: list[dict], overall: float):
+    # neat text table
+    col_names = ["Metric", "Raw", "CEFR", "New TOEFL (1–6)", "Old TOEFL (0–30)"]
+    widths = [16, 18, 6, 17, 18]
+    line = " | ".join(n.ljust(w) for n,w in zip(col_names, widths))
+    print("\n" + line)
+    print("-"*len(line))
+    for r in rows:
+        print(" | ".join([
+            str(r["Metric"]).ljust(widths[0]),
+            str(r["Raw"]).ljust(widths[1]),
+            str(r["CEFR"]).ljust(widths[2]),
+            f"{r['New TOEFL (1–6)']:.1f}".ljust(widths[3]),
+            r["Old TOEFL (0–30)"].ljust(widths[4]),
+        ]))
+    print("-"*len(line))
+    print(f"OVERALL (1–6): {overall:.1f}  | CEFR: {cefr_label(overall)} | Old TOEFL: {old_toefl_band(overall)}")
+
+
 # ------------------ GPT-4o Audio Evaluation ------------------
 
 def gpt4o_pronunciation_eval(
@@ -386,6 +575,23 @@ def main():
             print(f"  - {item.get('word')}: {item.get('reason')}")
     if gpt_eval.get("notes"):
         print("Notes:", gpt_eval["notes"])
+    
+        # === Grading table (New TOEFL 1–6, CEFR, Old TOEFL 0–30) ===
+    rows = build_grading_table(metrics)
+    overall = overall_new_toefl_score(rows)
+    print_grading_table(rows, overall)
+
+    # Also save alongside your existing JSON
+    grading_payload = {
+        "rows": rows,
+        "overall_new_toefl_1to6": overall,
+        "overall_cefr": cefr_label(overall),
+        "overall_old_toefl_0to30": old_toefl_band(overall),
+    }
+    with open("grading_table.json", "w") as f:
+        json.dump(grading_payload, f, indent=2)
+    print("\nSaved: grading_table.json")
+
 
 if __name__ == "__main__":
     main()

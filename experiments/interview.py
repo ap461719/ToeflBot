@@ -41,6 +41,100 @@ def cosine_sim(a: List[float], b: List[float]) -> float:
 def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
+# ==== TOEFL/CEFR helpers ====
+def cefr_label(score_1to6: float) -> str:
+    if score_1to6 >= 6.0: return "C2"
+    if score_1to6 >= 5.5: return "C1"
+    if score_1to6 >= 5.0: return "C1"
+    if score_1to6 >= 4.5: return "B2"
+    if score_1to6 >= 4.0: return "B2"
+    if score_1to6 >= 3.5: return "B1"
+    if score_1to6 >= 3.0: return "B1"
+    if score_1to6 >= 2.5: return "A2"
+    if score_1to6 >= 2.0: return "A2"
+    if score_1to6 >= 1.5: return "A1"
+    return "A1"
+
+TOEFL_OLD_MAP = {
+    6.0: "29–30", 5.5: "27–28", 5.0: "24–26", 4.5: "22–23",
+    4.0: "18–21", 3.5: "12–17", 3.0: "6–11", 2.5: "4–5",
+    2.0: "3",     1.5: "2",     1.0: "0–1",
+}
+def old_toefl_band(score_1to6: float) -> str:
+    step = round(score_1to6 * 2) / 2.0
+    step = max(1.0, min(6.0, step))
+    return TOEFL_OLD_MAP.get(step, TOEFL_OLD_MAP[6.0])
+
+# map a 0..1 score to 1..6 (used for interview subscores)
+def toefl_1to6_from_unit(x01: float) -> float:
+    return round(1.0 + 5.0 * clamp01(x01), 2)
+
+# speech metrics scorers (used for audio report)
+def score_speech_rate(wpm: float) -> float:
+    if 110 <= wpm <= 160: return 6.0
+    if 90  <= wpm < 110 or 160 < wpm <= 180: return 5.0
+    if 75  <= wpm <  90 or 180 < wpm <= 200: return 4.0
+    if 60  <= wpm <  75 or 200 < wpm <= 220: return 3.5
+    if 45  <= wpm <  60: return 3.0
+    return 2.5
+
+def score_duration(seconds: float) -> float:
+    if seconds >= 120: return 6.0
+    if 90 <= seconds < 120: return 5.0
+    if 60 <= seconds <  90: return 4.0
+    if 40 <= seconds <  60: return 3.5
+    if 20 <= seconds <  40: return 3.0
+    return 2.5
+
+def score_pause_frequency(pauses_per_min: float) -> float:
+    if 5 <= pauses_per_min <= 15: return 6.0
+    if 3 <= pauses_per_min < 5 or 15 < pauses_per_min <= 18: return 5.0
+    if 2 <= pauses_per_min < 3 or 18 < pauses_per_min <= 22: return 4.0
+    if 1 <= pauses_per_min < 2 or 22 < pauses_per_min <= 26: return 3.5
+    if pauses_per_min < 1 or 26 < pauses_per_min <= 30: return 3.0
+    return 2.5
+
+# grading table builders
+def build_interview_grading_table(avgs: dict) -> tuple[list[dict], float]:
+    """Use text-only subscores (0..1) from interview averages; map to 1..6."""
+    rel6   = toefl_1to6_from_unit(avgs["relevance"])
+    gram6  = toefl_1to6_from_unit(avgs["grammar"])
+    think6 = toefl_1to6_from_unit(avgs["thinking_time"])
+    rows = [
+        {"Metric":"Relevance","Raw":f"{avgs['relevance']:.2f}",
+         "CEFR":cefr_label(rel6),"New TOEFL (1–6)":rel6,"Old TOEFL (0–30)":old_toefl_band(rel6)},
+        {"Metric":"Grammar","Raw":f"{avgs['grammar']:.2f}",
+         "CEFR":cefr_label(gram6),"New TOEFL (1–6)":gram6,"Old TOEFL (0–30)":old_toefl_band(gram6)},
+        {"Metric":"Thinking time","Raw":f"{avgs['thinking_time']:.2f}",
+         "CEFR":cefr_label(think6),"New TOEFL (1–6)":think6,"Old TOEFL (0–30)":old_toefl_band(think6)},
+    ]
+    overall6 = round((rel6 + gram6 + think6) / 3.0, 2)
+    return rows, overall6
+
+def build_audio_grading_table(agg_metrics: dict) -> tuple[list[dict], float]:
+    """Use aggregate audio metrics; no repetition F1 available here."""
+    sr   = agg_metrics["speech_rate_wpm"]
+    dur  = agg_metrics["duration_s"]
+    ppm  = agg_metrics["pauses_per_min"]
+
+    sr6   = score_speech_rate(sr)
+    dur6  = score_duration(dur)
+    ppm6  = score_pause_frequency(ppm)
+
+    rows = [
+        {"Metric":"Speech rate","Raw":f"{sr:.0f} wpm",
+         "CEFR":cefr_label(sr6),"New TOEFL (1–6)":sr6,"Old TOEFL (0–30)":old_toefl_band(sr6)},
+        {"Metric":"Duration","Raw":f"{dur:.0f}s",
+         "CEFR":cefr_label(dur6),"New TOEFL (1–6)":dur6,"Old TOEFL (0–30)":old_toefl_band(dur6)},
+        {"Metric":"Pause frequency","Raw":f"{ppm:.1f} / min",
+         "CEFR":cefr_label(ppm6),"New TOEFL (1–6)":ppm6,"Old TOEFL (0–30)":old_toefl_band(ppm6)},
+    ]
+
+    # overall without repetition: heavier weight on speech + pauses
+    overall6 = round(0.5*sr6 + 0.3*ppm6 + 0.2*dur6, 2)
+    return rows, overall6
+
+
 
 
 #NEW HELPERS
@@ -232,6 +326,24 @@ def transcribe_and_analyze_audio_folder(
         "transcript": "\n".join(all_text).strip(),
     }
 
+def print_grading_table(rows: list[dict], overall_1to6: float, title="=== Rubric (TOEFL/CEFR) ==="):
+    col_names = ["Metric", "Raw", "CEFR", "New TOEFL (1–6)", "Old TOEFL (0–30)"]
+    widths = [18, 18, 6, 17, 18]
+    line = " | ".join(n.ljust(w) for n, w in zip(col_names, widths))
+    print("\n" + title)
+    print(line)
+    print("-" * len(line))
+    for r in rows:
+        print(" | ".join([
+            str(r["Metric"]).ljust(widths[0]),
+            str(r["Raw"]).ljust(widths[1]),
+            str(r["CEFR"]).ljust(widths[2]),
+            f"{r['New TOEFL (1–6)']:.2f}".ljust(widths[3]),
+            r["Old TOEFL (0–30)"].ljust(widths[4]),
+        ]))
+    print("-" * len(line))
+    print(f"OVERALL (1–6): {overall_1to6:.2f}  | CEFR: {cefr_label(overall_1to6)} | Old TOEFL: {old_toefl_band(overall_1to6)}")
+
 
 
 @dataclass
@@ -411,6 +523,19 @@ def run_interview(topic: str, rounds: int, model: str, judge_model: str | None =
             "final_score": final_score,
         },
     }
+    # --- attach grading table to interview report (text-only subscores) ---
+    rows_intv, overall6_intv = build_interview_grading_table({
+        "relevance": rel_avg,
+        "grammar": gram_avg,
+        "thinking_time": think_avg,
+    })
+    out["grading"] = {
+        "rows": rows_intv,
+        "overall_new_toefl_1to6": overall6_intv,
+        "overall_cefr": cefr_label(overall6_intv),
+        "overall_old_toefl_0to30": old_toefl_band(overall6_intv),
+    }
+
     with open("interview_report.json", "w") as f:
         json.dump(out, f, indent=2)
     print("\nSaved: interview_report.json")
@@ -435,8 +560,9 @@ def run_interview(topic: str, rounds: int, model: str, judge_model: str | None =
     if audio_dir and os.path.isdir(audio_dir):
         print("\nTranscribing + analyzing audio…")
         audio_result = transcribe_and_analyze_audio_folder(client, audio_dir)
-        m = audio_result["metrics"]
-        s = audio_result["scores"]
+
+        m = audio_result["aggregate"]["metrics"]   # FIXED path
+        s = audio_result["aggregate"]["scores"]    # FIXED path
 
         print("\n=== Speech Metrics ===")
         print(f"Duration: {m['duration_s']} s")
@@ -446,7 +572,7 @@ def run_interview(topic: str, rounds: int, model: str, judge_model: str | None =
         print("\n=== Pauses ===")
         print(f"Pause count: {m['pause_count']} | Pauses/min: {m['pauses_per_min']}")
         print(f"Avg pause: {m['avg_pause_s']} s | Median pause: {m['median_pause_s']} s")
-        print(f"Total pause time: {m['total_pause_time_s']} s")
+        # total_pause_time_s is per file; aggregate shows counts + avg pause
 
         # Merge audio into report and compute overall score
         out["audio"] = audio_result
@@ -455,9 +581,30 @@ def run_interview(topic: str, rounds: int, model: str, judge_model: str | None =
         out["averages"]["final_score_overall"] = final_score_overall
         print(f"\nAUDIO SCORE: {s['audio_score']:.2f}")
         print(f"OVERALL SCORE (text+audio): {final_score_overall:.2f}")
-    else:
-        print("\n(No audio folder provided. Set INTERVIEW_AUDIO_DIR=/path/to/wavs to analyze.)")
 
+        # --- grading for audio aggregates (and print) ---
+        rows_audio, overall6_audio = build_audio_grading_table(m)
+        out.setdefault("grading_audio", {})
+        out["grading_audio"].update({
+            "rows": rows_audio,
+            "overall_new_toefl_1to6": overall6_audio,
+            "overall_cefr": cefr_label(overall6_audio),
+            "overall_old_toefl_0to30": old_toefl_band(overall6_audio),
+        })
+        print_grading_table(rows_audio, overall6_audio, title="=== Rubric (Audio) ===")
+
+
+    # grading for audio aggregates
+    agg_m = audio_result["aggregate"]["metrics"]
+    rows_audio, overall6_audio = build_audio_grading_table(agg_m)
+    out.setdefault("grading_audio", {})
+    out["grading_audio"].update({
+        "rows": rows_audio,
+        "overall_new_toefl_1to6": overall6_audio,
+        "overall_cefr": cefr_label(overall6_audio),
+        "overall_old_toefl_0to30": old_toefl_band(overall6_audio),
+    })
+  
     with open("interview_report.json", "w") as f:
         json.dump(out, f, indent=2)
     print("\nSaved: interview_report.json")
@@ -495,10 +642,32 @@ def main():
         agg_m = audio_result["aggregate"]["metrics"]
         agg_s = audio_result["aggregate"]["scores"]
 
+        # --- print rubric to console ---
+        rows_audio, overall6_audio = build_audio_grading_table(agg_m)
+        print_grading_table(rows_audio, overall6_audio)
+
+        # --- attach grading to audio-only JSON ---
+        audio_result["grading"] = {
+            "rows": rows_audio,
+            "overall_new_toefl_1to6": overall6_audio,
+            "overall_cefr": cefr_label(overall6_audio),
+            "overall_old_toefl_0to30": old_toefl_band(overall6_audio),
+        }
+
+
         print("\n=== Aggregate ===")
         print(f"Duration: {agg_m['duration_s']} s | Words: {agg_m['words_spoken']} | WPM: {agg_m['speech_rate_wpm']}")
         print(f"Pauses/min: {agg_m['pauses_per_min']} | Avg pause: {agg_m['avg_pause_s']} s")
         print(f"\nAVERAGE AUDIO SCORE: {agg_s['audio_score']:.2f}")
+
+        # === attach grading to audio-only report ===
+        rows_audio, overall6_audio = build_audio_grading_table(agg_m)
+        audio_result["grading"] = {
+            "rows": rows_audio,
+            "overall_new_toefl_1to6": overall6_audio,
+            "overall_cefr": cefr_label(overall6_audio),
+            "overall_old_toefl_0to30": old_toefl_band(overall6_audio),
+        }
 
         with open("audio_report.json", "w") as f:
             json.dump(audio_result, f, indent=2)
