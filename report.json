@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "generation_failed": false,
+  "errors": [],
+  "overall_score": {
+    "cefr": "A1",
+    "toefl_score": "2",
+    "old_toefl_score": "16"
+  },
+  "speech_rate": 72,
+  "duration": "02:37",
+  "repeat_accuracy": {
+    "score": 53
+  },
+  "incorrect_segments": [
+    "week's",
+    "temperature",
+    "architecture",
+    "comfortable",
+    "rural garden on the roof,",
+    "adjusts ventilation",
+    "handheld",
+    "interesting.",
+    "slightly",
+    "return",
+    "evaluate",
+    "we develop over the next year.",
+    "term",
+    "conducted",
+    "campus James Dealy energy use.",
+    "lab, Breitori,",
+    "statistics",
+    "lighting, ventilation,",
+    "prototype",
+    "highlights",
+    "surprising phenomenon. When all of",
+    "analysis suggests",
+    "could",
+    "CO2 emissions without hurting performance.",
+    "month",
+    "present",
+    "methodology",
+    "City Museum's Technology Exhibition"
+  ],
+  "mispronounced_words": [],
+  "fluency": {
+    "speech_rate_level": "A1",
+    "coherence_level": "A2",
+    "pause_frequency_level": "B2",
+    "pause_appropriateness_level": "A1",
+    "repeat_accuracy_level": "A2",
+    "description": "Speech is understandable with some pauses; rate 72 wpm; repetition accuracy 53%.",
+    "description_cn": "整体可理解；语速约 72 词/分钟；复述准确率约 53% 。"
+  },
+  "pronunciation": {
+    "prosody_rhythm_level": "B1",
+    "vowel_fullness_level": "B1",
+    "intonation_level": "B1",
+    "accuracy_score": 100,
+    "description": "Pronunciation is generally intelligible; rhythm and vowel quality can improve.",
+    "description_cn": "发音整体清晰；节奏与元音质量仍可提升。"
+  },
+  "grammar": {
+    "accuracy_level": "C1",
+    "repeat_accuracy_level": "A2",
+    "issues": []
+  }
+}

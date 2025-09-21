@@ -12,6 +12,9 @@ import requests
 from jiwer import wer
 import difflib
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # (Optional) OpenAI client for GPT-4o helpers
 try:
     from openai import OpenAI
