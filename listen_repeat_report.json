@@ -1,0 +1,127 @@
+{
+  "version": "1.0",
+  "generation_failed": false,
+  "errors": [
+    {
+      "prompt_audio_url": "data/p01_prompt.wav",
+      "student_audio_url": "data/p01_student.wav",
+      "error_type": "GPTAudioError",
+      "error_message": "Error code: 400 - {'error': {'message': \"Invalid value: 'text'. Supported values are: 'input_text', 'input_image', 'output_text', 'refusal', 'input_file', 'computer_screenshot', and 'summary_text'.\", 'type': 'invalid_request_error', 'param': 'input[0].content[0].type', 'code': 'invalid_value'}}"
+    },
+    {
+      "prompt_audio_url": "data/p02_prompt.wav",
+      "student_audio_url": "data/p02_student.wav",
+      "error_type": "GPTAudioError",
+      "error_message": "Error code: 400 - {'error': {'message': \"Invalid value: 'text'. Supported values are: 'input_text', 'input_image', 'output_text', 'refusal', 'input_file', 'computer_screenshot', and 'summary_text'.\", 'type': 'invalid_request_error', 'param': 'input[0].content[0].type', 'code': 'invalid_value'}}"
+    }
+  ],
+  "overall_score": {
+    "cefr": "A1",
+    "toefl_score": "2",
+    "old_toefl_score": "16"
+  },
+  "speech_rate": 72,
+  "duration": "02:37",
+  "repeat_accuracy": {
+    "score": 53
+  },
+  "incorrect_segments": [
+    "week's",
+    "temperature",
+    "architecture",
+    "comfortable",
+    "rural garden on the roof,",
+    "adjusts ventilation",
+    "handheld",
+    "interesting.",
+    "slightly",
+    "return",
+    "evaluate",
+    "we develop over the next year.",
+    "term",
+    "conducted",
+    "campus James Dealy energy use.",
+    "lab, Breitori,",
+    "statistics",
+    "lighting, ventilation,",
+    "prototype",
+    "highlights",
+    "surprising phenomenon. When all of",
+    "analysis suggests",
+    "could",
+    "CO2 emissions without hurting performance.",
+    "month",
+    "present",
+    "methodology",
+    "City Museum's Technology Exhibition"
+  ],
+  "mispronounced_words": [],
+  "fluency": {
+    "speech_rate_level": "A1",
+    "coherence_level": "A2",
+    "pause_frequency_level": "B2",
+    "pause_appropriateness_level": "A1",
+    "repeat_accuracy_level": "A2",
+    "description": "Speech is understandable with some pauses; rate 72 wpm; repetition accuracy 53%.",
+    "description_cn": "整体可理解；语速约 72 词/分钟；复述准确率约 53% 。"
+  },
+  "pronunciation": {
+    "prosody_rhythm_level": "B1",
+    "vowel_fullness_level": "B1",
+    "intonation_level": "B1",
+    "accuracy_score": 100,
+    "description": "Pronunciation is generally intelligible; rhythm and vowel quality can improve.",
+    "description_cn": "发音整体清晰；节奏与元音质量仍可提升。"
+  },
+  "grammar": {
+    "accuracy_level": "B2",
+    "repeat_accuracy_level": "A2",
+    "issues": [
+      {
+        "span": "temp fracture",
+        "explanation": "Incorrect word choice; 'temp fracture' is not a valid phrase.",
+        "suggestion": "temperature"
+      },
+      {
+        "span": "Architech Shore",
+        "explanation": "Incorrect article usage; 'Architech Shore' should be preceded by 'The'.",
+        "suggestion": "The Architect Shore"
+      },
+      {
+        "span": "comfort table",
+        "explanation": "Incorrect word choice; 'comfort table' is not a valid phrase.",
+        "suggestion": "comfortable table"
+      },
+      {
+        "span": "them that just to the weather",
+        "explanation": "Incorrect word order and missing verb; 'them that just to the weather' is not grammatically correct.",
+        "suggestion": "them that adjusts to the weather"
+      },
+      {
+        "span": "you all shifted",
+        "explanation": "Incorrect pronoun usage; 'you all' is informal and not appropriate here.",
+        "suggestion": "the schedule shifted"
+      },
+      {
+        "span": "there is many data",
+        "explanation": "Incorrect subject-verb agreement; 'is' should be 'are' to agree with 'data'.",
+        "suggestion": "there are many data"
+      },
+      {
+        "span": "when tillation",
+        "explanation": "Incorrect word choice; 'when tillation' is not a valid phrase.",
+        "suggestion": "ventilation"
+      },
+      {
+        "span": "phenom phenon",
+        "explanation": "Incorrect word choice; 'phenom phenon' is not a valid phrase.",
+        "suggestion": "phenomenon"
+      },
+      {
+        "span": "Anatletsis",
+        "explanation": "Incorrect word choice; 'Anatletsis' is not a valid word.",
+        "suggestion": "analysis"
+      }
+    ]
+  }
+}

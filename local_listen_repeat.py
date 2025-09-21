@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os, json, math, tempfile, shutil, base64, io
 from dataclasses import dataclass
-from typing import List, Dict, Any, Callable, Optional, Tuple
+from typing import List, Dict, Any, Callable, Optional, Tuple, Literal
 from urllib.parse import urlparse
 
 # ---- audio & ASR deps ----
@@ -60,6 +60,8 @@ class LocalListenRepeatReport:
         api_key: Optional[str] = None,
         audio_model: str = "gpt-4o-audio-preview",
         text_model: str = "gpt-4o",
+        embed_model: str = "text-embedding-3-small",           # <-- for interview relevance
+        task: Literal["listen_repeat", "interview"] = "listen_repeat",  # <-- task switch
     ):
         """
         GPT-4o is required. API key is taken from `api_key` or the OPENAI_API_KEY env var.
@@ -83,6 +85,8 @@ class LocalListenRepeatReport:
         self._has_responses = hasattr(self._openai, "responses")
         self._audio_model = audio_model
         self._text_model = text_model
+        self._embed_model = embed_model
+        self.task = task
 
         # transcript cache to avoid re-running ASR on same files
         # NOTE: stores (text, duration_seconds); words are recomputed per call when needed
@@ -207,23 +211,51 @@ class LocalListenRepeatReport:
                 except Exception as e:
                     errors.append(self._err_obj("-", "-", "GPTTextError", str(e)))
 
-            # 5) Sections
-            fluency = self._build_fluency_section(
-                speech_rate=speech_rate,
-                acc=repeat_accuracy_score,
-                pause_freq_lvl=pause_freq_lvl,
-                pause_app_lvl=pause_app_lvl
-            )
-            pronunciation = self._build_pronunciation_section(
-                mispronounced=mispronounced_words,
-                total_words=total_student_words,
-                accuracy_score=pron_acc_score
-            )
-            grammar = self._build_grammar_section(
-                acc=repeat_accuracy_score,
-                grammar_score=grammar_score,
-                issues=grammar_issues
-            )
+            # 5) Sections (task-specific branching)
+            if self.task == "listen_repeat":
+                fluency = self._build_fluency_section(
+                    speech_rate=speech_rate,
+                    acc=repeat_accuracy_score,
+                    pause_freq_lvl=pause_freq_lvl,
+                    pause_app_lvl=pause_app_lvl
+                )
+                pronunciation = self._build_pronunciation_section(
+                    mispronounced=mispronounced_words,
+                    total_words=total_student_words,
+                    accuracy_score=pron_acc_score
+                )
+                grammar = self._build_grammar_section(
+                    acc=repeat_accuracy_score,
+                    grammar_score=grammar_score,
+                    issues=grammar_issues
+                )
+                extra_blocks = {}
+            else:  # --- interview ---
+                # relevance via embeddings (question vs answer)
+                rel_label = self._embedding_relevance(prompt_tx, student_tx)
+                # discourse via GPT-4o label
+                disc_label = self._gpt4o_discourse(all_student_text)
+                # fluency with extra word repetition level
+                wr_level = self._word_repetition_level(all_student_text)
+                fluency = self._build_fluency_section(
+                    speech_rate=speech_rate,
+                    acc=repeat_accuracy_score,
+                    pause_freq_lvl=pause_freq_lvl,
+                    pause_app_lvl=pause_app_lvl
+                )
+                fluency["word_repetition_level"] = wr_level
+                pronunciation = self._build_pronunciation_section(
+                    mispronounced=mispronounced_words,
+                    total_words=total_student_words,
+                    accuracy_score=pron_acc_score
+                )
+                grammar = self._build_interview_grammar(grammar_issues)
+                vocab = self._vocabulary_block(all_student_text)
+                extra_blocks = {
+                    "relevance": {"score": rel_label},
+                    "discourse": {"score": disc_label},
+                    "vocabulary": vocab,
+                }
 
             # 6) Overall block
             overall_score = self._overall_block(speech_rate, repeat_accuracy_score)
@@ -246,6 +278,7 @@ class LocalListenRepeatReport:
                 "pronunciation": pronunciation,
                 "grammar": grammar,
             }
+            report.update(extra_blocks)
 
             self._save_json(report, out_path)
             return report
@@ -307,7 +340,6 @@ class LocalListenRepeatReport:
             try:
                 resp = self._retry(_call_with_rf)
             except TypeError as e:
-                # Older Responses signature — retry without response_format
                 if "response_format" in str(e):
                     resp = self._retry(_call_without_rf)
                 else:
@@ -327,9 +359,6 @@ class LocalListenRepeatReport:
         raw = resp.choices[0].message.content.strip() if resp.choices else "{}"
         return _parse_words(raw)
 
-
-
-
     def _gpt4o_grammar(self, student_transcript: str) -> Dict[str, Any]:
         """
         Call GPT-4o text to return grammar issues and a 0–100 score.
@@ -339,17 +368,16 @@ class LocalListenRepeatReport:
         user_msg = {
             "role": "user",
             "content": (
-                            "Analyze the transcript ONLY for GRAMMAR (agreement, tense, articles, prepositions, word order).\n"
-            "STRICTLY IGNORE: mishears, nonsense tokens, misspellings from ASR/pronunciation, and simple word choice.\n"
-            "If a token is not a valid English word, IGNORE it and do not flag it.\n"
-            "Return ONLY valid JSON with fields:\n"
-            "{\n"
-            '  "issues": [ {"span": string, "explanation": string, "suggestion": string}... ],\n'
-            '  "score": integer 0-100\n'
-            "}\n"
-            "Keep 'issues' concise and specific to grammar.\n\n"
-            f"Transcript:\n{student_transcript}"
-
+                "Analyze the transcript ONLY for GRAMMAR (agreement, tense, articles, prepositions, word order).\n"
+                "STRICTLY IGNORE: mishears, nonsense tokens, misspellings from ASR/pronunciation, and simple word choice.\n"
+                "If a token is not a valid English word, IGNORE it and do not flag it.\n"
+                "Return ONLY valid JSON with fields:\n"
+                "{\n"
+                '  "issues": [ {"span": string, "explanation": string, "suggestion": string}... ],\n'
+                '  "score": integer 0-100\n'
+                "}\n"
+                "Keep 'issues' concise and specific to grammar.\n\n"
+                f"Transcript:\n{student_transcript}"
             )
         }
 
@@ -367,7 +395,6 @@ class LocalListenRepeatReport:
         try:
             data = json.loads(raw)
         except Exception:
-            # Try to strip code-fences / prefixes if the model added any
             cleaned = raw.strip().strip("`")
             if cleaned.startswith("json"):
                 cleaned = cleaned[4:].strip()
@@ -393,6 +420,138 @@ class LocalListenRepeatReport:
                     "suggestion": str(it.get("suggestion", ""))[:200],
                 })
         return {"issues": norm_issues, "score": score}
+
+    # ----------------- Interview-specific helpers -----------------
+
+    def _embedding_relevance(self, prompt_tx: List[Tuple[str, float]],
+                             student_tx: List[Tuple[str, float]]) -> str:
+        """
+        Compute semantic relevance using embeddings (cosine similarity)
+        between each interviewer question (prompt) and its paired answer (student).
+        Return the *lowest* (most conservative) CEFR label across pairs.
+        """
+        pairs = [(q.strip(), a.strip()) for (q,_), (a,_) in zip(prompt_tx, student_tx) if q.strip() and a.strip()]
+        if not pairs:
+            return "A1"
+
+        # Batch embed all texts in one request where possible
+        texts = []
+        for q,a in pairs:
+            texts.append(q)
+            texts.append(a)
+        embs = self._openai.embeddings.create(model=self._embed_model, input=texts).data
+        vecs: List[List[float]] = [e.embedding for e in embs]
+
+        labels = []
+        for i in range(0, len(vecs), 2):
+            qv, av = vecs[i], vecs[i+1]
+            sim = self._cosine(qv, av)
+            labels.append(self._sim_to_cefr(sim))
+        # conservative: return the lowest label
+        order = ["A1","A2","B1","B2","C1","C2"]
+        return min(labels, key=order.index) if labels else "A1"
+
+    @staticmethod
+    def _cosine(a: List[float], b: List[float]) -> float:
+        if not a or not b: return 0.0
+        dot = sum(x*y for x,y in zip(a,b))
+        na = math.sqrt(sum(x*x for x in a))
+        nb = math.sqrt(sum(y*y for y in b))
+        if na == 0 or nb == 0: return 0.0
+        return dot/(na*nb)
+
+    @staticmethod
+    def _sim_to_cefr(sim: float) -> str:
+        # Heuristic thresholds for embedding cosine sim
+        if sim >= 0.82: return "C1"
+        if sim >= 0.74: return "B2"
+        if sim >= 0.66: return "B1"
+        if sim >= 0.58: return "A2"
+        return "A1"
+
+    def _tokens(self, text: str) -> List[str]:
+        return [t.lower() for t in text.split() if t.strip()]
+
+    def _word_repetition_level(self, text: str) -> str:
+        """Map repetition rate to CEFR-ish level (more repetition -> lower level)."""
+        toks = [t for t in self._tokens(text) if t.isalpha()]
+        if not toks: return "C1"
+        from collections import Counter
+        cnt = Counter(toks)
+        rep_rate = sum((c-1) for c in cnt.values() if c>1) / len(toks)  # repeats / total
+        if rep_rate > 0.25: return "A1"
+        if rep_rate > 0.18: return "A2"
+        if rep_rate > 0.12: return "B1"
+        if rep_rate > 0.07: return "B2"
+        return "C1"
+
+    def _vocabulary_block(self, text: str) -> Dict[str, str]:
+        """Proxies: complexity≈avg word length; diversity≈type/token ratio."""
+        toks = [t for t in self._tokens(text) if t.isalpha()]
+        if not toks:
+            return {"complexity_level": "A1", "diversity_level": "A1",
+                    "description": "Not enough data.", "description_cn": "数据不足。"}
+        avg_len = sum(len(t) for t in toks)/len(toks)
+        ttr = len(set(toks))/len(toks)
+        def lvl_len(x):
+            if x < 4.2: return "A1"
+            if x < 4.8: return "A2"
+            if x < 5.4: return "B1"
+            if x < 6.0: return "B2"
+            return "C1"
+        def lvl_ttr(x):
+            if x < 0.35: return "A1"
+            if x < 0.45: return "A2"
+            if x < 0.55: return "B1"
+            if x < 0.65: return "B2"
+            return "C1"
+        return {
+            "complexity_level": lvl_len(avg_len),
+            "diversity_level": lvl_ttr(ttr),
+            "description": "Lexical complexity and diversity estimated from word length and type–token ratio.",
+            "description_cn": "基于词长与类型/词汇比估算词汇复杂度与多样性。"
+        }
+
+    def _build_interview_grammar(self, gpt_issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Convert grammar issues (span/explanation/suggestion)
+        into interview schema: errors[{original_sentence, corrected_sentence, fdiff: [...]}]
+        """
+        errors = []
+        for it in gpt_issues or []:
+            span = str(it.get("span",""))
+            sugg = str(it.get("suggestion",""))
+            expl = str(it.get("explanation",""))
+            errors.append({
+                "original_sentence": span,
+                "corrected_sentence": sugg,
+                "fdiff": [{
+                    "has_error": True,
+                    "orig": span,
+                    "corr": sugg,
+                    "error_type_description": expl[:120],
+                    "feedback": expl,
+                    "feedback_cn": ""
+                }]
+            })
+        lvl = self._level_from_accuracy(100 - min(50, 10*len(errors)))  # crude fallback
+        return {"accuracy_level": lvl, "errors": errors, "description": ""}
+
+    def _gpt4o_discourse(self, answer_text: str) -> str:
+        """Rate discourse coherence/organization as CEFR label via GPT-4o."""
+        if not answer_text.strip(): return "A1"
+        system = {"role":"system","content":"You evaluate discourse coherence and structure."}
+        user = {"role":"user","content":(
+            "Rate the discourse coherence/organization of the text using CEFR bands (A1..C1). "
+            "Return ONLY JSON like {\"label\":\"B1\"}.\n\nText:\n"+answer_text)}
+        resp = self._retry(lambda: self._openai.chat.completions.create(
+            model=self._text_model, messages=[system,user], temperature=0,
+            response_format={"type":"json_object"}))
+        raw = resp.choices[0].message.content.strip()
+        try:
+            return json.loads(raw).get("label","A1")
+        except Exception:
+            return "A1"
 
     # ----------------- audio, asr, utils -----------------
 
@@ -545,7 +704,6 @@ class LocalListenRepeatReport:
         pct = 1.0 - (len(mispronounced) / float(total_words))
         return max(0, min(100, int(round(100 * pct))))
 
-
     @staticmethod
     def _split_wav_bytes(b: bytes, chunk_ms: int = 20000) -> List[bytes]:
         """
@@ -553,7 +711,7 @@ class LocalListenRepeatReport:
         returning a list of WAV-bytes chunks.
         """
         try:
-         seg = AudioSegment.from_file(BytesIO(b), format="wav")
+            seg = AudioSegment.from_file(BytesIO(b), format="wav")
         except Exception:
             return [b]  # if parsing fails, just return original
         chunks = []
@@ -569,7 +727,7 @@ class LocalListenRepeatReport:
     def _build_fluency_section(self, speech_rate: int, acc: int,
                                pause_freq_lvl: str, pause_app_lvl: str) -> Dict[str, Any]:
         sr_lvl = self._level_from_speech_rate(speech_rate)
-        rep_lvl = self._level_from_accuracy(acc)  # proxy for coherence; replace if you add a coherence metric
+        rep_lvl = self._level_from_accuracy(acc)
         return {
             "speech_rate_level": sr_lvl,
             "coherence_level": rep_lvl,
@@ -648,7 +806,6 @@ class LocalListenRepeatReport:
 
     @staticmethod
     def _toefl_band(pct: int) -> int:
-        # Simple mapping; replace with ETS table if desired.
         if pct < 50: return 1
         if pct < 60: return 2
         if pct < 70: return 3
@@ -658,7 +815,6 @@ class LocalListenRepeatReport:
 
     @staticmethod
     def _overall_cefr(wpm: int, pct: int) -> str:
-        # Conservative overall = lower (weaker) of rate-level and accuracy-level.
         levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
         l_sr = levels.index(LocalListenRepeatReport._level_from_speech_rate(wpm))
         l_acc = levels.index(LocalListenRepeatReport._level_from_accuracy(pct))
@@ -690,7 +846,6 @@ class LocalListenRepeatReport:
     ) -> bool:
         if not pairs:
             return True
-        # Consider a pair failed if either transcript is empty.
         failed = 0
         for (pt, _), (st, _) in zip(prompt_tx, student_tx):
             if not pt.strip() or not st.strip():
@@ -716,7 +871,6 @@ class LocalListenRepeatReport:
 
     @staticmethod
     def _resolve_compute_type(compute_type: str) -> str:
-        # Let faster-whisper decide unless explicitly set.
         return compute_type if compute_type != "auto" else "default"
 
     @staticmethod
@@ -733,13 +887,9 @@ class LocalListenRepeatReport:
             return r.content
         with open(path_or_url, "rb") as f:
             return f.read()
-    
 
     @staticmethod
     def _retry(fn: Callable[[], Any], attempts: int = 3, base_delay: float = 0.75) -> Any:
-        """
-        Retry helper with exponential backoff. Re-raises the last error.
-        """
         last = None
         for i in range(attempts):
             try:
@@ -752,10 +902,6 @@ class LocalListenRepeatReport:
 
     @staticmethod
     def _load_wav_bytes_16k_mono(path_or_url: str) -> bytes:
-        """
-        Load arbitrary audio, convert to 16kHz mono WAV in-memory (much smaller & stable for API).
-        Falls back to raw bytes if conversion fails.
-        """
         try:
             parsed = urlparse(path_or_url)
             if parsed.scheme in ("http", "https"):
@@ -769,17 +915,43 @@ class LocalListenRepeatReport:
             wav16.export(buf, format="wav")
             return buf.getvalue()
         except Exception:
-            # Last resort: raw bytes (may be large)
             return LocalListenRepeatReport._maybe_fetch_bytes(path_or_url)
 
 
 
-if __name__ == "__main__":
-    pairs = [
-        ListenRepeatPair("data/p01_prompt.wav", "data/p01_student.wav"),
-        ListenRepeatPair("data/p02_prompt.wav", "data/p02_student.wav"),
-    ]
+# if __name__ == "__main__":
+#     # ----- Listen & Repeat -----
+#     pairs = [
+#         ListenRepeatPair("data/p01_prompt.wav", "data/p01_student.wav"),
+#         ListenRepeatPair("data/p02_prompt.wav", "data/p02_student.wav"),
+#     ]
+#     reporter = LocalListenRepeatReport(task="listen_repeat")
+#     report = reporter.generate_report(pairs, out_path="listen_repeat_report.json")
+#     print("Saved listen_repeat_report.json")
 
-    reporter = LocalListenRepeatReport()
-    report = reporter.generate_report(pairs, out_path="report.json")
-    print("Saved report.json")
+#     # ----- Interview (example) -----
+#     # Replace with your real interviewer/answer URLs (or local files)
+#     interview_pairs = [
+#         ListenRepeatPair("data/p01_prompt.wav", "data/p01_student.wav"),
+#         ListenRepeatPair("data/p02_prompt.wav", "data/p02_student.wav"),
+#     ]
+#     interview_reporter = LocalListenRepeatReport(task="interview")
+#     interview_report = interview_reporter.generate_report(interview_pairs, out_path="interview_report.json")
+#     print("Saved interview_report.json")
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--task", choices=["listen_repeat","interview"], required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--pairs", nargs="+", help="prompt.wav:student.wav (or URLs)", required=True)
+    args = ap.parse_args()
+
+    prs = []
+    for p in args.pairs:
+        prompt, student = p.split(":", 1)
+        prs.append(ListenRepeatPair(prompt, student))
+
+    LocalListenRepeatReport(task=args.task).generate_report(prs, args.out)
+

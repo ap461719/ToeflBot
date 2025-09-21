@@ -1,0 +1,221 @@
+{
+  "version": "1.0",
+  "generation_failed": false,
+  "errors": [
+    {
+      "prompt_audio_url": "data/p01_prompt.wav",
+      "student_audio_url": "data/p01_student.wav",
+      "error_type": "GPTAudioError",
+      "error_message": "Error code: 400 - {'error': {'message': \"Invalid value: 'text'. Supported values are: 'input_text', 'input_image', 'output_text', 'refusal', 'input_file', 'computer_screenshot', and 'summary_text'.\", 'type': 'invalid_request_error', 'param': 'input[0].content[0].type', 'code': 'invalid_value'}}"
+    },
+    {
+      "prompt_audio_url": "data/p02_prompt.wav",
+      "student_audio_url": "data/p02_student.wav",
+      "error_type": "GPTAudioError",
+      "error_message": "Error code: 400 - {'error': {'message': \"Invalid value: 'text'. Supported values are: 'input_text', 'input_image', 'output_text', 'refusal', 'input_file', 'computer_screenshot', and 'summary_text'.\", 'type': 'invalid_request_error', 'param': 'input[0].content[0].type', 'code': 'invalid_value'}}"
+    }
+  ],
+  "overall_score": {
+    "cefr": "A1",
+    "toefl_score": "2",
+    "old_toefl_score": "16"
+  },
+  "speech_rate": 72,
+  "duration": "02:37",
+  "repeat_accuracy": {
+    "score": 53
+  },
+  "incorrect_segments": [
+    "week's",
+    "temperature",
+    "architecture",
+    "comfortable",
+    "rural garden on the roof,",
+    "adjusts ventilation",
+    "handheld",
+    "interesting.",
+    "slightly",
+    "return",
+    "evaluate",
+    "we develop over the next year.",
+    "term",
+    "conducted",
+    "campus James Dealy energy use.",
+    "lab, Breitori,",
+    "statistics",
+    "lighting, ventilation,",
+    "prototype",
+    "highlights",
+    "surprising phenomenon. When all of",
+    "analysis suggests",
+    "could",
+    "CO2 emissions without hurting performance.",
+    "month",
+    "present",
+    "methodology",
+    "City Museum's Technology Exhibition"
+  ],
+  "mispronounced_words": [],
+  "fluency": {
+    "speech_rate_level": "A1",
+    "coherence_level": "A2",
+    "pause_frequency_level": "B2",
+    "pause_appropriateness_level": "A1",
+    "repeat_accuracy_level": "A2",
+    "description": "Speech is understandable with some pauses; rate 72 wpm; repetition accuracy 53%.",
+    "description_cn": "整体可理解；语速约 72 词/分钟；复述准确率约 53% 。",
+    "word_repetition_level": "A1"
+  },
+  "pronunciation": {
+    "prosody_rhythm_level": "B1",
+    "vowel_fullness_level": "B1",
+    "intonation_level": "B1",
+    "accuracy_score": 100,
+    "description": "Pronunciation is generally intelligible; rhythm and vowel quality can improve.",
+    "description_cn": "发音整体清晰；节奏与元音质量仍可提升。"
+  },
+  "grammar": {
+    "accuracy_level": "A2",
+    "errors": [
+      {
+        "original_sentence": "temp fracture",
+        "corrected_sentence": "temperature",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "temp fracture",
+            "corr": "temperature",
+            "error_type_description": "Incorrect word choice; 'temp fracture' is not a valid phrase.",
+            "feedback": "Incorrect word choice; 'temp fracture' is not a valid phrase.",
+            "feedback_cn": ""
+          }
+        ]
+      },
+      {
+        "original_sentence": "Architech Shore",
+        "corrected_sentence": "The Architect Shore",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "Architech Shore",
+            "corr": "The Architect Shore",
+            "error_type_description": "Incorrect article usage; 'Architech Shore' should be preceded by 'The'.",
+            "feedback": "Incorrect article usage; 'Architech Shore' should be preceded by 'The'.",
+            "feedback_cn": ""
+          }
+        ]
+      },
+      {
+        "original_sentence": "comfort table",
+        "corrected_sentence": "comfortable table",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "comfort table",
+            "corr": "comfortable table",
+            "error_type_description": "Incorrect word choice; 'comfort table' is not a valid phrase.",
+            "feedback": "Incorrect word choice; 'comfort table' is not a valid phrase.",
+            "feedback_cn": ""
+          }
+        ]
+      },
+      {
+        "original_sentence": "them that just to the weather",
+        "corrected_sentence": "them that adjusts to the weather",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "them that just to the weather",
+            "corr": "them that adjusts to the weather",
+            "error_type_description": "Incorrect word order and missing verb; 'them that just to the weather' is not grammatically correct.",
+            "feedback": "Incorrect word order and missing verb; 'them that just to the weather' is not grammatically correct.",
+            "feedback_cn": ""
+          }
+        ]
+      },
+      {
+        "original_sentence": "schedule you all shifted",
+        "corrected_sentence": "schedule shifted you all",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "schedule you all shifted",
+            "corr": "schedule shifted you all",
+            "error_type_description": "Incorrect word order; 'you all' should follow 'shifted'.",
+            "feedback": "Incorrect word order; 'you all' should follow 'shifted'.",
+            "feedback_cn": ""
+          }
+        ]
+      },
+      {
+        "original_sentence": "there is many data",
+        "corrected_sentence": "there are many data",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "there is many data",
+            "corr": "there are many data",
+            "error_type_description": "Incorrect subject-verb agreement; 'data' is plural.",
+            "feedback": "Incorrect subject-verb agreement; 'data' is plural.",
+            "feedback_cn": ""
+          }
+        ]
+      },
+      {
+        "original_sentence": "when tillation",
+        "corrected_sentence": "ventilation",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "when tillation",
+            "corr": "ventilation",
+            "error_type_description": "Incorrect word choice; 'when tillation' is not a valid phrase.",
+            "feedback": "Incorrect word choice; 'when tillation' is not a valid phrase.",
+            "feedback_cn": ""
+          }
+        ]
+      },
+      {
+        "original_sentence": "phenom phenon",
+        "corrected_sentence": "phenomenon",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "phenom phenon",
+            "corr": "phenomenon",
+            "error_type_description": "Incorrect word choice; 'phenom phenon' is not a valid phrase.",
+            "feedback": "Incorrect word choice; 'phenom phenon' is not a valid phrase.",
+            "feedback_cn": ""
+          }
+        ]
+      },
+      {
+        "original_sentence": "Anatletsis",
+        "corrected_sentence": "analysis",
+        "fdiff": [
+          {
+            "has_error": true,
+            "orig": "Anatletsis",
+            "corr": "analysis",
+            "error_type_description": "Incorrect word choice; 'Anatletsis' is not a valid word.",
+            "feedback": "Incorrect word choice; 'Anatletsis' is not a valid word.",
+            "feedback_cn": ""
+          }
+        ]
+      }
+    ],
+    "description": ""
+  },
+  "relevance": {
+    "score": "C1"
+  },
+  "discourse": {
+    "score": "B1"
+  },
+  "vocabulary": {
+    "complexity_level": "A2",
+    "diversity_level": "C1",
+    "description": "Lexical complexity and diversity estimated from word length and type–token ratio.",
+    "description_cn": "基于词长与类型/词汇比估算词汇复杂度与多样性。"
+  }
+}
