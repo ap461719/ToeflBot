@@ -5,17 +5,19 @@ from typing import List, Dict, Any, Callable, Optional, Tuple
 from urllib.parse import urlparse
 
 # ---- audio & ASR deps ----
-# pip install faster-whisper pydub jiwer requests openai
+# pip install faster-whisper pydub jiwer requests openai python-dotenv
 from faster_whisper import WhisperModel
 from pydub import AudioSegment
 import requests
 from jiwer import wer
 import difflib
+import time
+from io import BytesIO
 
 from dotenv import load_dotenv
 load_dotenv()
 
-# (Optional) OpenAI client for GPT-4o helpers
+# OpenAI client for GPT-4o helpers (now required)
 try:
     from openai import OpenAI
 except Exception:
@@ -44,8 +46,8 @@ class LocalListenRepeatReport:
          - repeat accuracy (WER-based) and incorrect_segments,
          - pause statistics (from word timestamps) → levels:
              pause_frequency_level, pause_appropriateness_level
-      3) (Optional) detect mispronounced words via a supplied function (e.g., GPT-4o-audio)
-      4) (Optional) detect grammar errors from the transcript via a supplied function (e.g., GPT-4o text)
+      3) Detect mispronounced words via GPT-4o-audio
+      4) Detect grammar errors from the transcript via GPT-4o text
       5) Build JSON in the schema shown in your screenshots and save to disk
     """
 
@@ -54,27 +56,15 @@ class LocalListenRepeatReport:
         whisper_model_size: str = "base",
         device: str = "auto",     # "cuda" or "cpu" or "auto"
         compute_type: str = "auto",
-        mispronunciation_fn: Optional[
-            Callable[[str, str, str, str], List[str]]
-        ] = None,
-        grammar_fn: Optional[
-            Callable[[str], Dict[str, Any]]
-        ] = None,
-        version: str = "1.0"
+        version: str = "1.0",
+        api_key: Optional[str] = None,
+        audio_model: str = "gpt-4o-audio-preview",
+        text_model: str = "gpt-4o",
     ):
         """
-        mispronunciation_fn:
-            (prompt_audio_path_or_url, student_audio_path_or_url, prompt_text, student_text)
-              -> List[str]    # mispronounced words only
-
-        grammar_fn:
-            (student_full_transcript) -> {"issues": [ ... ], "score": int}
-
-        Provide these to plug in GPT-4o audio/text helpers; otherwise leave None.
+        GPT-4o is required. API key is taken from `api_key` or the OPENAI_API_KEY env var.
         """
         self.version = version
-        self.mispronunciation_fn = mispronunciation_fn
-        self.grammar_fn = grammar_fn
 
         # init Whisper
         self._whisper = WhisperModel(
@@ -82,6 +72,16 @@ class LocalListenRepeatReport:
             device=self._resolve_device(device),
             compute_type=self._resolve_compute_type(compute_type),
         )
+
+        # OpenAI client (required)
+        if OpenAI is None:
+            raise RuntimeError("openai package not installed. pip install openai")
+        key = api_key or os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise RuntimeError("OPENAI_API_KEY not set")
+        self._openai = OpenAI(api_key=key)
+        self._audio_model = audio_model
+        self._text_model = text_model
 
         # transcript cache to avoid re-running ASR on same files
         # NOTE: stores (text, duration_seconds); words are recomputed per call when needed
@@ -173,16 +173,17 @@ class LocalListenRepeatReport:
             pause_freq_lvl = self._pause_frequency_level(pause_stats["pauses_per_min"])
             pause_app_lvl = self._pause_appropriateness_level(long_ratio)
 
-            # 3) Mispronunciations (optional)
+            # 3) Mispronunciations (GPT-4o audio; required)
             mis_all_for_scoring: List[str] = []
             mispronounced_words: List[str] = []
-            if self.mispronunciation_fn is not None:
-                for p, (pt_text, _), (st_text, _) in zip(pairs, prompt_tx, student_tx):
-                    if pt_text.strip() and st_text.strip():
-                        # pass original URL or local path — helper accepts either
-                        lst = self.mispronunciation_fn(p.prompt_audio, p.student_audio, pt_text, st_text) or []
+            for p, (pt_text, _), (st_text, _) in zip(pairs, prompt_tx, student_tx):
+                if pt_text.strip() and st_text.strip():
+                    try:
+                        lst = self._gpt4o_mispronunciations(p.prompt_audio, p.student_audio, pt_text, st_text) or []
                         mis_all_for_scoring.extend(lst)
                         mispronounced_words.extend(lst)
+                    except Exception as e:
+                        errors.append(self._err_obj(p.prompt_audio, p.student_audio, "GPTAudioError", str(e)))
             # de-dup for display while preserving order
             seen = set()
             mispronounced_words = [w for w in mispronounced_words if not (w in seen or seen.add(w))]
@@ -190,18 +191,20 @@ class LocalListenRepeatReport:
             # Pronunciation score from mispronounced / total words (use raw counts for scoring)
             pron_acc_score = self._pronunciation_score(mis_all_for_scoring, total_student_words)
 
-            # 4) Grammar (optional, from transcript via GPT)
+            # 4) Grammar (GPT-4o text; required)
             grammar_issues: List[Dict[str, Any]] = []
             grammar_score: Optional[int] = None
-            if self.grammar_fn is not None and all_student_text:
+            if all_student_text:
                 try:
-                    g = self.grammar_fn(all_student_text) or {}
+                    g = self._gpt4o_grammar(all_student_text) or {}
                     grammar_issues = list(g.get("issues", []))
                     gs = g.get("score", None)
                     if isinstance(gs, (int, float)):
                         grammar_score = max(0, min(100, int(round(gs))))
+                    else:
+                        grammar_score = None
                 except Exception as e:
-                    errors.append(self._err_obj("-", "-", "GrammarFnError", str(e)))
+                    errors.append(self._err_obj("-", "-", "GPTTextError", str(e)))
 
             # 5) Sections
             fluency = self._build_fluency_section(
@@ -227,7 +230,7 @@ class LocalListenRepeatReport:
             # 7) generation_failed flag (true only if every pair failed)
             generation_failed = self._all_failed(pairs, errors, prompt_tx, student_tx)
 
-            # 8) Final report (matches your schema; pronunciation includes accuracy_score)
+            # 8) Final report
             report = {
                 "version": self.version,
                 "generation_failed": generation_failed,
@@ -248,6 +251,125 @@ class LocalListenRepeatReport:
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # ----------------- GPT-4o calls (required) -----------------
+
+    def _gpt4o_mispronunciations(self, prompt_audio: str, student_audio: str,
+                                 prompt_text: str, student_text: str) -> List[str]:
+        """
+        Call GPT-4o audio to return a list of mispronounced words.
+        We normalize audio to 16kHz mono WAV to reduce payload & errors, and we retry.
+        """
+        p_bytes = self._load_wav_bytes_16k_mono(prompt_audio)
+        s_bytes = self._load_wav_bytes_16k_mono(student_audio)
+
+        def audio_part(b: bytes) -> Dict[str, Any]:
+            return {
+                "type": "input_audio",
+                "audio": {
+                    "data": base64.b64encode(b).decode("utf-8"),
+                    "format": "wav"
+                },
+            }
+
+        system_msg = {"role": "system", "content": "You are a precise ASR/phonetics judge."}
+        user_content = [
+            {"type": "text", "text":
+                "Compare the student's pronunciation against the reference audio + text. "
+                "Return ONLY valid JSON: {\"words\": [\"word1\", ...]} with unique, lowercase mispronounced words. "
+                "If none, return {\"words\": []}."
+            },
+            {"type": "text", "text": f"Reference transcript:\n{prompt_text}"},
+            audio_part(p_bytes),
+            {"type": "text", "text": f"Student transcript:\n{student_text}"},
+            audio_part(s_bytes),
+        ]
+        user_msg = {"role": "user", "content": user_content}
+
+        def _call():
+            resp = self._openai.chat.completions.create(
+                model=self._audio_model,
+                messages=[system_msg, user_msg],
+                temperature=0,
+                # (some deployments support this param on text modes only; harmless if ignored)
+                response_format={"type": "json_object"}
+            )
+            return resp
+
+        resp = self._retry(_call)
+        raw = resp.choices[0].message.content.strip() if resp.choices else "{}"
+        try:
+            data = json.loads(raw)
+        except Exception:
+            # Try to salvage JSON if model wrapped it in code fences
+            raw = raw.strip().strip("`")
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+            data = json.loads(raw)
+
+        words = data.get("words", [])
+        return [str(w).strip().lower() for w in words if str(w).strip()]
+
+    def _gpt4o_grammar(self, student_transcript: str) -> Dict[str, Any]:
+        """
+        Call GPT-4o text to return grammar issues and a 0–100 score.
+        Forces JSON output and retries on transient errors.
+        """
+        system_msg = {"role": "system", "content": "You are a strict grammar evaluator."}
+        user_msg = {
+            "role": "user",
+            "content": (
+                "Analyze the following spoken-transcript text for grammar issues. "
+                "Return ONLY valid JSON with fields:\n"
+                "{\n"
+                '  \"issues\": [ {\"span\": string, \"explanation\": string, \"suggestion\": string}... ],\n'
+                '  \"score\": integer 0-100\n'
+                "}\n"
+                "Keep 'issues' concise and specific to grammar.\n\n"
+                f"Transcript:\n{student_transcript}"
+            )
+        }
+
+        def _call():
+            return self._openai.chat.completions.create(
+                model=self._text_model,
+                messages=[system_msg, user_msg],
+                temperature=0,
+                response_format={"type": "json_object"}  # <- forces JSON
+            )
+
+        resp = self._retry(_call)
+        raw = resp.choices[0].message.content.strip() if resp.choices else "{}"
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            # Try to strip code-fences / prefixes if the model added any
+            cleaned = raw.strip().strip("`")
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+            data = json.loads(cleaned)
+
+        if not isinstance(data, dict):
+            return {"issues": [], "score": 100}
+
+        issues = data.get("issues", [])
+        score = data.get("score", 100)
+        try:
+            score = int(score)
+        except Exception:
+            score = 100
+        score = max(0, min(100, score))
+
+        norm_issues = []
+        for it in issues or []:
+            if isinstance(it, dict):
+                norm_issues.append({
+                    "span": str(it.get("span", ""))[:200],
+                    "explanation": str(it.get("explanation", ""))[:300],
+                    "suggestion": str(it.get("suggestion", ""))[:200],
+                })
+        return {"issues": norm_issues, "score": score}
 
     # ----------------- audio, asr, utils -----------------
 
@@ -428,7 +550,7 @@ class LocalListenRepeatReport:
             "prosody_rhythm_level": base,
             "vowel_fullness_level": base,
             "intonation_level": base,
-            "accuracy_score": accuracy_score,     # <-- numeric pronunciation score (your request)
+            "accuracy_score": accuracy_score,
             "description": "Pronunciation is generally intelligible; rhythm and vowel quality can improve.",
             "description_cn": "发音整体清晰；节奏与元音质量仍可提升。"
         }
@@ -450,7 +572,7 @@ class LocalListenRepeatReport:
         return {
             "accuracy_level": lvl,
             "repeat_accuracy_level": self._level_from_accuracy(acc),
-            "issues": issues  # extra detail; safe to ignore downstream if unused
+            "issues": issues
         }
 
     def _overall_block(self, speech_rate: int, acc: int) -> Dict[str, str]:
@@ -560,28 +682,7 @@ class LocalListenRepeatReport:
         ext = os.path.splitext(urlparse(path_or_url).path)[1].lower().lstrip(".")
         return ext or "wav"
 
-
-# --------------------- GPT-4o helper factories (optional) ---------------------
-
-def make_gpt4o_mispronunciation_fn(
-    api_key: Optional[str] = None,
-    audio_model: str = "gpt-4o-audio-preview"
-) -> Callable[[str, str, str, str], List[str]]:
-    """
-    Returns a function that takes (prompt_audio, student_audio, prompt_text, student_text)
-    and returns a list of mispronounced words (strings). Works with either local paths or URLs.
-
-    Requires the official OpenAI Python package and an API key.
-    """
-    if OpenAI is None:
-        raise RuntimeError("openai package not installed. pip install openai")
-
-    key = api_key or os.getenv("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-
-    client = OpenAI(api_key=key)
-
+    @staticmethod
     def _maybe_fetch_bytes(path_or_url: str) -> bytes:
         parsed = urlparse(path_or_url)
         if parsed.scheme in ("http", "https"):
@@ -590,148 +691,53 @@ def make_gpt4o_mispronunciation_fn(
             return r.content
         with open(path_or_url, "rb") as f:
             return f.read()
+    
 
-    def _fn(prompt_audio: str, student_audio: str, prompt_text: str, student_text: str) -> List[str]:
-        # Read audio bytes and base64-encode for input_audio content
-        try:
-            p_bytes = _maybe_fetch_bytes(prompt_audio)
-            s_bytes = _maybe_fetch_bytes(student_audio)
-        except Exception:
-            # If audio fetch fails, gracefully fall back to text-only heuristic (no mispronunciations)
-            p_bytes, s_bytes = b"", b""
-
-        fmt_p = LocalListenRepeatReport._guess_audio_format(prompt_audio)
-        fmt_s = LocalListenRepeatReport._guess_audio_format(student_audio)
-
-        def audio_part(b: bytes, fmt: str) -> Dict[str, Any]:
-            if not b:
-                return {"type": "text", "text": "(audio missing)"}
-            return {
-                "type": "input_audio",
-                "audio": {
-                    "data": base64.b64encode(b).decode("utf-8"),
-                    "format": fmt or "wav"
-                },
-            }
-
-        prompt = (
-            "Compare the student's pronunciation against the reference prompt. "
-            "Return ONLY a compact JSON with a single field 'words' listing "
-            "the mispronounced words (unique, lowercase), derived from the student's speech. "
-            "If none, return {'words':[]}."
-        )
-
-        msg_content = [
-            {"type": "text", "text": prompt},
-            {"type": "text", "text": f"Reference transcript:\n{prompt_text}"},
-            audio_part(p_bytes, fmt_p),
-            {"type": "text", "text": f"Student transcript:\n{student_text}"},
-            audio_part(s_bytes, fmt_s),
-        ]
-
-        try:
-            # Chat Completions with multimodal audio input (see OpenAI cookbook examples)
-            resp = client.chat.completions.create(
-                model=audio_model,
-                messages=[
-                    {"role": "system", "content": "You are a precise ASR/phonetics judge."},
-                    {"role": "user", "content": msg_content},
-                ],
-                temperature=0
-            )
-            raw = resp.choices[0].message.content.strip() if resp.choices else "{}"
-        except Exception:
-            return []
-
-        try:
-            data = json.loads(raw)
-            words = data.get("words", [])
-            return [str(w).strip().lower() for w in words if str(w).strip()]
-        except Exception:
-            # if model didn't return valid JSON, attempt a naive fallback
-            return []
-
-    return _fn
-
-
-def make_gpt4o_grammar_fn(
-    api_key: Optional[str] = None,
-    text_model: str = "gpt-4o"
-) -> Callable[[str], Dict[str, Any]]:
-    """
-    Returns a function that takes (student_full_transcript) and returns:
-      {"issues": [{"span": "...", "explanation": "...", "suggestion": "..."}...], "score": 0-100}
-
-    Uses GPT-4o text. The score is a holistic 0–100 grammar quality estimate.
-    """
-    if OpenAI is None:
-        raise RuntimeError("openai package not installed. pip install openai")
-
-    key = api_key or os.getenv("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-
-    client = OpenAI(api_key=key)
-
-    def _fn(student_transcript: str) -> Dict[str, Any]:
-        prompt = (
-            "Analyze the following spoken-transcript text for grammar issues. "
-            "Return ONLY valid JSON with fields:\n"
-            "{\n"
-            '  "issues": [ {"span": string, "explanation": string, "suggestion": string}... ],\n'
-            '  "score": integer 0-100  # higher is better grammar\n'
-            "}\n"
-            "Keep 'issues' short and focused. If there are no issues, return an empty list and a high score."
-        )
-        try:
-            resp = client.chat.completions.create(
-                model=text_model,
-                messages=[
-                    {"role": "system", "content": "You are a strict grammar evaluator."},
-                    {"role": "user", "content": f"{prompt}\n\nTranscript:\n{student_transcript}"},
-                ],
-                temperature=0
-            )
-            raw = resp.choices[0].message.content.strip() if resp.choices else "{}"
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                return {"issues": [], "score": 100}
-            issues = data.get("issues", [])
-            score = data.get("score", 100)
+    @staticmethod
+    def _retry(fn: Callable[[], Any], attempts: int = 3, base_delay: float = 0.75) -> Any:
+        """
+        Retry helper with exponential backoff. Re-raises the last error.
+        """
+        last = None
+        for i in range(attempts):
             try:
-                score = int(score)
-            except Exception:
-                score = 100
-            score = max(0, min(100, score))
-            # normalize issues
-            norm_issues = []
-            for it in issues or []:
-                if isinstance(it, dict):
-                    norm_issues.append({
-                        "span": str(it.get("span", ""))[:200],
-                        "explanation": str(it.get("explanation", ""))[:300],
-                        "suggestion": str(it.get("suggestion", ""))[:200],
-                    })
-            return {"issues": norm_issues, "score": score}
-        except Exception:
-            return {"issues": [], "score": 100}
+                return fn()
+            except Exception as e:
+                last = e
+                if i < attempts - 1:
+                    time.sleep(base_delay * (2 ** i))
+        raise last
 
-    return _fn
+    @staticmethod
+    def _load_wav_bytes_16k_mono(path_or_url: str) -> bytes:
+        """
+        Load arbitrary audio, convert to 16kHz mono WAV in-memory (much smaller & stable for API).
+        Falls back to raw bytes if conversion fails.
+        """
+        try:
+            parsed = urlparse(path_or_url)
+            if parsed.scheme in ("http", "https"):
+                r = requests.get(path_or_url, timeout=30)
+                r.raise_for_status()
+                src = AudioSegment.from_file(BytesIO(r.content))
+            else:
+                src = AudioSegment.from_file(path_or_url)
+            wav16 = src.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+            buf = BytesIO()
+            wav16.export(buf, format="wav")
+            return buf.getvalue()
+        except Exception:
+            # Last resort: raw bytes (may be large)
+            return LocalListenRepeatReport._maybe_fetch_bytes(path_or_url)
+
 
 
 if __name__ == "__main__":
-    # If you placed the factory helpers in the same file, you can import/use them directly.
-    # Otherwise: from your_module import LocalListenRepeatReport, ListenRepeatPair, make_gpt4o_mispronunciation_fn, make_gpt4o_grammar_fn
-
     pairs = [
         ListenRepeatPair("data/p01_prompt.wav", "data/p01_student.wav"),
         ListenRepeatPair("data/p02_prompt.wav", "data/p02_student.wav"),
     ]
 
-    reporter = LocalListenRepeatReport(
-        mispronunciation_fn=make_gpt4o_mispronunciation_fn(),  # optional
-        grammar_fn=make_gpt4o_grammar_fn(),                    # optional
-    )
-
+    reporter = LocalListenRepeatReport()
     report = reporter.generate_report(pairs, out_path="report.json")
     print("Saved report.json")

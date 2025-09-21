@@ -8,4 +8,6 @@ librosa>=0.10.2.post1
 soundfile>=0.12.1
 pyloudnorm>=0.1.1
 openai>=1.30.0
-python-dotenv>=1.0.1   # if you decide to use a .env
+python-dotenv>=1.0.1   
+pydub>=0.25.1
+requests>=2.31.0

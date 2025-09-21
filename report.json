@@ -1,7 +1,20 @@
 {
   "version": "1.0",
   "generation_failed": false,
-  "errors": [],
+  "errors": [
+    {
+      "prompt_audio_url": "data/p01_prompt.wav",
+      "student_audio_url": "data/p01_student.wav",
+      "error_type": "GPTAudioError",
+      "error_message": "Error code: 500 - {'error': {'message': 'The server had an error processing your request. Sorry about that! You can retry your request, or contact us through our help center at help.openai.com if you keep seeing this error. (Please include the request ID req_4880924d13e34bacbee07d3879c59e4e in your email.)', 'type': 'server_error', 'param': None, 'code': None}}"
+    },
+    {
+      "prompt_audio_url": "data/p02_prompt.wav",
+      "student_audio_url": "data/p02_student.wav",
+      "error_type": "GPTAudioError",
+      "error_message": "Error code: 500 - {'error': {'message': 'The server had an error processing your request. Sorry about that! You can retry your request, or contact us through our help center at help.openai.com if you keep seeing this error. (Please include the request ID req_0691d7b60d22406c94760399dc60e6cf in your email.)', 'type': 'server_error', 'param': None, 'code': None}}"
+    }
+  ],
   "overall_score": {
     "cefr": "A1",
     "toefl_score": "2",
@@ -61,8 +74,59 @@
     "description_cn": "发音整体清晰；节奏与元音质量仍可提升。"
   },
   "grammar": {
-    "accuracy_level": "C1",
+    "accuracy_level": "B1",
     "repeat_accuracy_level": "A2",
-    "issues": []
+    "issues": [
+      {
+        "span": "temp fracture",
+        "explanation": "The term 'temp fracture' is incorrect. It seems to be a mispronunciation or misspelling of 'temperature'.",
+        "suggestion": "temperature"
+      },
+      {
+        "span": "Architech Shore",
+        "explanation": "The term 'Architech Shore' is likely a mispronunciation or misspelling of 'architecture'.",
+        "suggestion": "architecture"
+      },
+      {
+        "span": "comfort table",
+        "explanation": "The term 'comfort table' is incorrect. It seems to be a mispronunciation or misspelling of 'comfortable'.",
+        "suggestion": "comfortable"
+      },
+      {
+        "span": "read them that just to the weather",
+        "explanation": "The phrase is grammatically incorrect and unclear. It seems to be a mispronunciation or misspelling of 'read them and adjust to the weather'.",
+        "suggestion": "read them and adjust to the weather"
+      },
+      {
+        "span": "schedule you all shifted",
+        "explanation": "The phrase 'schedule you all shifted' is incorrect. It seems to be a mispronunciation or misspelling of 'schedule was shifted'.",
+        "suggestion": "schedule was shifted"
+      },
+      {
+        "span": "there is many data",
+        "explanation": "The phrase 'there is many data' is incorrect. 'Data' is a plural noun, so it should be 'there are many data'.",
+        "suggestion": "there are many data"
+      },
+      {
+        "span": "status-dicks",
+        "explanation": "The term 'status-dicks' is incorrect. It seems to be a mispronunciation or misspelling of 'statistics'.",
+        "suggestion": "statistics"
+      },
+      {
+        "span": "when tillation",
+        "explanation": "The term 'when tillation' is incorrect. It seems to be a mispronunciation or misspelling of 'ventilation'.",
+        "suggestion": "ventilation"
+      },
+      {
+        "span": "phenom phenon",
+        "explanation": "The term 'phenom phenon' is incorrect. It seems to be a mispronunciation or misspelling of 'phenomenon'.",
+        "suggestion": "phenomenon"
+      },
+      {
+        "span": "Anatletsis",
+        "explanation": "The term 'Anatletsis' is incorrect. It seems to be a mispronunciation or misspelling of 'analysis'.",
+        "suggestion": "analysis"
+      }
+    ]
   }
 }
