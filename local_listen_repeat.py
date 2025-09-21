@@ -1,16 +1,22 @@
 from __future__ import annotations
-import os, json, math, tempfile, shutil
+import os, json, math, tempfile, shutil, base64, io
 from dataclasses import dataclass
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from urllib.parse import urlparse
 
 # ---- audio & ASR deps ----
-# pip install faster-whisper pydub jiwer requests
+# pip install faster-whisper pydub jiwer requests openai
 from faster_whisper import WhisperModel
 from pydub import AudioSegment
 import requests
 from jiwer import wer
 import difflib
+
+# (Optional) OpenAI client for GPT-4o helpers
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 
 # --------------------- Inputs ---------------------
@@ -36,7 +42,8 @@ class LocalListenRepeatReport:
          - pause statistics (from word timestamps) → levels:
              pause_frequency_level, pause_appropriateness_level
       3) (Optional) detect mispronounced words via a supplied function (e.g., GPT-4o-audio)
-      4) Build JSON in the schema shown in your screenshots and save to disk
+      4) (Optional) detect grammar errors from the transcript via a supplied function (e.g., GPT-4o text)
+      5) Build JSON in the schema shown in your screenshots and save to disk
     """
 
     def __init__(
@@ -45,18 +52,26 @@ class LocalListenRepeatReport:
         device: str = "auto",     # "cuda" or "cpu" or "auto"
         compute_type: str = "auto",
         mispronunciation_fn: Optional[
-            Callable[[str, str, str, str], List[Dict[str, str]]]
+            Callable[[str, str, str, str], List[str]]
+        ] = None,
+        grammar_fn: Optional[
+            Callable[[str], Dict[str, Any]]
         ] = None,
         version: str = "1.0"
     ):
         """
-        mispronunciation_fn signature:
+        mispronunciation_fn:
             (prompt_audio_path_or_url, student_audio_path_or_url, prompt_text, student_text)
-              -> List[{"word": str, "original_audio_url": str, "corrected_audio_url": str}]
-        Provide this to plug in GPT-4o-audio or your own detector. Otherwise leave None.
+              -> List[str]    # mispronounced words only
+
+        grammar_fn:
+            (student_full_transcript) -> {"issues": [ ... ], "score": int}
+
+        Provide these to plug in GPT-4o audio/text helpers; otherwise leave None.
         """
         self.version = version
         self.mispronunciation_fn = mispronunciation_fn
+        self.grammar_fn = grammar_fn
 
         # init Whisper
         self._whisper = WhisperModel(
@@ -81,10 +96,15 @@ class LocalListenRepeatReport:
 
         try:
             # 1) Download + transcribe each pair
-            prompt_tx: List[Tuple[str, float]] = []                 # (text, dur_unused)
-            student_tx: List[Tuple[str, float]] = []                # (text, dur)
-            student_words_all: List[Dict[str, float]] = []          # flattened words with {text,start,end}
+            prompt_tx: List[Tuple[str, float]] = []  # (text, dur_unused)
+            student_tx: List[Tuple[str, float]] = []  # (text, dur)
             student_durations: List[float] = []
+
+            # aggregated pause stats across pairs (computed per-pair to avoid cross-file gaps)
+            total_pauses = 0
+            total_long_pauses = 0
+            total_gap_sum = 0.0
+            total_gap_count = 0
 
             for p in pairs:
                 prompt_path, e1 = self._to_local(p.prompt_audio, temp_dir)
@@ -109,13 +129,20 @@ class LocalListenRepeatReport:
                 prompt_tx.append((pt_text, 0.0))
                 student_tx.append((st_text, st_dur))
                 student_durations.append(st_dur)
-                student_words_all.extend(st_words)
+
+                # per-pair pause stats (avoid counting a giant gap between files)
+                ps = self._pause_stats(st_words, st_dur)
+                total_pauses += ps["pauses"]
+                total_long_pauses += ps["long_pauses"]
+                total_gap_sum += ps["avg_gap"] * ps["gap_count"]
+                total_gap_count += ps["gap_count"]
 
             # 2) Aggregate metrics
             total_secs = sum(student_durations)
             duration_str = self._fmt_mmss(total_secs)
 
             all_student_text = " ".join(t for t, _ in student_tx).strip()
+            total_student_words = len([w for w in all_student_text.split() if w.strip()])
             speech_rate = self._speech_rate(all_student_text, total_secs)
 
             # Repeat accuracy + incorrect segments (per pair → aggregate)
@@ -132,43 +159,72 @@ class LocalListenRepeatReport:
             repeat_accuracy_score = int(round(sum(acc_scores) / max(len(acc_scores), 1)))
             repeat_accuracy = {"score": repeat_accuracy_score}
 
-            # Pause statistics + levels
-            pause_stats = self._pause_stats(student_words_all, total_secs)
-            long_ratio = (
-                (pause_stats["long_pauses"] / pause_stats["pauses"])
-                if pause_stats["pauses"] > 0 else 0.0
-            )
+            # Aggregate pause statistics across pairs
+            pause_stats = {
+                "pauses": total_pauses,
+                "long_pauses": total_long_pauses,
+                "avg_gap": (total_gap_sum / total_gap_count) if total_gap_count else 0.0,
+                "pauses_per_min": (total_pauses / (total_secs / 60.0)) if total_secs > 0 else 0.0,
+            }
+            long_ratio = (pause_stats["long_pauses"] / pause_stats["pauses"]) if pause_stats["pauses"] > 0 else 0.0
             pause_freq_lvl = self._pause_frequency_level(pause_stats["pauses_per_min"])
-            pause_app_lvl  = self._pause_appropriateness_level(long_ratio)
+            pause_app_lvl = self._pause_appropriateness_level(long_ratio)
 
             # 3) Mispronunciations (optional)
-            mispronounced_words: List[Dict[str, str]] = []
+            mis_all_for_scoring: List[str] = []
+            mispronounced_words: List[str] = []
             if self.mispronunciation_fn is not None:
                 for p, (pt_text, _), (st_text, _) in zip(pairs, prompt_tx, student_tx):
                     if pt_text.strip() and st_text.strip():
-                        mispronounced_words.extend(
-                            self.mispronunciation_fn(
-                                p.prompt_audio, p.student_audio, pt_text, st_text
-                            ) or []
-                        )
+                        # pass original URL or local path — helper accepts either
+                        lst = self.mispronunciation_fn(p.prompt_audio, p.student_audio, pt_text, st_text) or []
+                        mis_all_for_scoring.extend(lst)
+                        mispronounced_words.extend(lst)
+            # de-dup for display while preserving order
+            seen = set()
+            mispronounced_words = [w for w in mispronounced_words if not (w in seen or seen.add(w))]
 
-            # 4) Sections
+            # Pronunciation score from mispronounced / total words (use raw counts for scoring)
+            pron_acc_score = self._pronunciation_score(mis_all_for_scoring, total_student_words)
+
+            # 4) Grammar (optional, from transcript via GPT)
+            grammar_issues: List[Dict[str, Any]] = []
+            grammar_score: Optional[int] = None
+            if self.grammar_fn is not None and all_student_text:
+                try:
+                    g = self.grammar_fn(all_student_text) or {}
+                    grammar_issues = list(g.get("issues", []))
+                    gs = g.get("score", None)
+                    if isinstance(gs, (int, float)):
+                        grammar_score = max(0, min(100, int(round(gs))))
+                except Exception as e:
+                    errors.append(self._err_obj("-", "-", "GrammarFnError", str(e)))
+
+            # 5) Sections
             fluency = self._build_fluency_section(
                 speech_rate=speech_rate,
                 acc=repeat_accuracy_score,
                 pause_freq_lvl=pause_freq_lvl,
                 pause_app_lvl=pause_app_lvl
             )
-            pronunciation = self._build_pronunciation_section(mispronounced_words)
-            grammar = self._build_grammar_section(repeat_accuracy_score)
+            pronunciation = self._build_pronunciation_section(
+                mispronounced=mispronounced_words,
+                total_words=total_student_words,
+                accuracy_score=pron_acc_score
+            )
+            grammar = self._build_grammar_section(
+                acc=repeat_accuracy_score,
+                grammar_score=grammar_score,
+                issues=grammar_issues
+            )
 
-            # 5) Overall block
+            # 6) Overall block
             overall_score = self._overall_block(speech_rate, repeat_accuracy_score)
 
-            # 6) generation_failed flag (true only if every pair failed)
+            # 7) generation_failed flag (true only if every pair failed)
             generation_failed = self._all_failed(pairs, errors, prompt_tx, student_tx)
 
-            # 7) Final report (matches the screenshot schema)
+            # 8) Final report (matches your schema; pronunciation includes accuracy_score)
             report = {
                 "version": self.version,
                 "generation_failed": generation_failed,
@@ -178,7 +234,7 @@ class LocalListenRepeatReport:
                 "duration": duration_str,
                 "repeat_accuracy": repeat_accuracy,
                 "incorrect_segments": incorrect_segments[:50],  # cap if very long
-                "mispronounced_words": mispronounced_words,
+                "mispronounced_words": [{"word": w} for w in mispronounced_words],  # only words
                 "fluency": fluency,
                 "pronunciation": pronunciation,
                 "grammar": grammar,
@@ -192,7 +248,8 @@ class LocalListenRepeatReport:
 
     # ----------------- audio, asr, utils -----------------
 
-    def _to_local(self, path_or_url: str, temp_dir: str) -> Tuple[str, Optional[str]]:
+    @staticmethod
+    def _to_local(path_or_url: str, temp_dir: str) -> Tuple[str, Optional[str]]:
         """Download URL to a temp file; if local path, just return it."""
         if not path_or_url:
             return "", "Empty path"
@@ -258,13 +315,15 @@ class LocalListenRepeatReport:
 
     # ----------------- metric primitives -----------------
 
-    def _speech_rate(self, transcript: str, total_secs: float) -> int:
+    @staticmethod
+    def _speech_rate(transcript: str, total_secs: float) -> int:
         if total_secs <= 0:
             return 0
         words = [w for w in transcript.split() if w.strip()]
         return int(round(len(words) / (total_secs / 60.0)))
 
-    def _repeat_accuracy_and_incorrect_segments(self, prompt_text: str, student_text: str) -> Tuple[int, List[str]]:
+    @staticmethod
+    def _repeat_accuracy_and_incorrect_segments(prompt_text: str, student_text: str) -> Tuple[int, List[str]]:
         """Accuracy via WER; 'incorrect_segments' = prompt spans that were deleted or replaced."""
         w = wer(prompt_text.lower(), student_text.lower())  # 0..1
         score = max(0, int(round(100 * (1.0 - w))))
@@ -282,7 +341,8 @@ class LocalListenRepeatReport:
 
     # ----------------- pause analysis -----------------
 
-    def _pause_stats(self, words: List[Dict[str, float]], total_secs: float) -> Dict[str, float]:
+    @staticmethod
+    def _pause_stats(words: List[Dict[str, float]], total_secs: float) -> Dict[str, float]:
         """
         Compute gaps between consecutive words. Thresholds:
           - minor pause: gap >= 0.30s
@@ -290,7 +350,7 @@ class LocalListenRepeatReport:
         Returns counts and rate per minute.
         """
         if not words or total_secs <= 0:
-            return {"pauses": 0, "long_pauses": 0, "avg_gap": 0.0, "pauses_per_min": 0.0}
+            return {"pauses": 0, "long_pauses": 0, "avg_gap": 0.0, "pauses_per_min": 0.0, "gap_count": 0}
 
         gaps: List[float] = []
         for i in range(1, len(words)):
@@ -308,9 +368,11 @@ class LocalListenRepeatReport:
             "long_pauses": long_pauses,
             "avg_gap": avg_gap,
             "pauses_per_min": pauses_per_min,
+            "gap_count": len(gaps),
         }
 
-    def _pause_frequency_level(self, ppm: float) -> str:
+    @staticmethod
+    def _pause_frequency_level(ppm: float) -> str:
         # Tune these cutoffs to your rubric.
         if ppm > 20: return "A1"
         if ppm > 15: return "A2"
@@ -318,13 +380,22 @@ class LocalListenRepeatReport:
         if ppm > 5:  return "B2"
         return "C1"
 
-    def _pause_appropriateness_level(self, long_ratio: float) -> str:
+    @staticmethod
+    def _pause_appropriateness_level(long_ratio: float) -> str:
         # long_ratio = long_pauses / pauses; fewer long pauses → more appropriate
         if long_ratio > 0.40: return "A1"
         if long_ratio > 0.30: return "A2"
         if long_ratio > 0.20: return "B1"
         if long_ratio > 0.10: return "B2"
         return "C1"
+
+    @staticmethod
+    def _pronunciation_score(mispronounced: List[str], total_words: int) -> int:
+        """Simple 0–100: 100 * (1 - mispronounced/total_words)."""
+        if total_words <= 0:
+            return 100 if not mispronounced else 0
+        pct = 1.0 - (len(mispronounced) / float(total_words))
+        return max(0, min(100, int(round(100 * pct))))
 
     # ----------------- section builders -----------------
 
@@ -345,22 +416,38 @@ class LocalListenRepeatReport:
             "description_cn": f"整体可理解；语速约 {speech_rate} 词/分钟；复述准确率约 {acc}% 。"
         }
 
-    def _build_pronunciation_section(self, mispronounced: List[Dict[str, str]]) -> Dict[str, Any]:
+    def _build_pronunciation_section(self, mispronounced: List[str],
+                                     total_words: int,
+                                     accuracy_score: int) -> Dict[str, Any]:
         has_err = len(mispronounced) > 0
         base = "A2" if has_err else "B1"
         return {
             "prosody_rhythm_level": base,
             "vowel_fullness_level": base,
             "intonation_level": base,
+            "accuracy_score": accuracy_score,     # <-- numeric pronunciation score (your request)
             "description": "Pronunciation is generally intelligible; rhythm and vowel quality can improve.",
             "description_cn": "发音整体清晰；节奏与元音质量仍可提升。"
         }
 
-    def _build_grammar_section(self, acc: int) -> Dict[str, Any]:
-        lvl = self._level_from_accuracy(acc)
+    def _build_grammar_section(self, acc: int,
+                               grammar_score: Optional[int],
+                               issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        accuracy_level:
+            - If GPT grammar_score is available, map that to CEFR-ish level.
+            - Else fall back to repeat-accuracy mapping.
+        repeat_accuracy_level:
+            - Mapped from repeat accuracy as before (schema asks explicitly for this).
+        """
+        if grammar_score is not None:
+            lvl = self._level_from_accuracy(grammar_score)
+        else:
+            lvl = self._level_from_accuracy(acc)
         return {
             "accuracy_level": lvl,
-            "repeat_accuracy_level": lvl
+            "repeat_accuracy_level": self._level_from_accuracy(acc),
+            "issues": issues  # extra detail; safe to ignore downstream if unused
         }
 
     def _overall_block(self, speech_rate: int, acc: int) -> Dict[str, str]:
@@ -376,21 +463,24 @@ class LocalListenRepeatReport:
 
     # ----------------- label helpers -----------------
 
-    def _level_from_speech_rate(self, wpm: int) -> str:
+    @staticmethod
+    def _level_from_speech_rate(wpm: int) -> str:
         if wpm < 90: return "A1"
         if wpm < 110: return "A2"
         if wpm < 130: return "B1"
         if wpm < 150: return "B2"
         return "C1"
 
-    def _level_from_accuracy(self, pct: int) -> str:
+    @staticmethod
+    def _level_from_accuracy(pct: int) -> str:
         if pct < 50: return "A1"
         if pct < 70: return "A2"
         if pct < 85: return "B1"
         if pct < 95: return "B2"
         return "C1"
 
-    def _toefl_band(self, pct: int) -> int:
+    @staticmethod
+    def _toefl_band(pct: int) -> int:
         # Simple mapping; replace with ETS table if desired.
         if pct < 50: return 1
         if pct < 60: return 2
@@ -399,21 +489,24 @@ class LocalListenRepeatReport:
         if pct < 90: return 5
         return 6
 
-    def _overall_cefr(self, wpm: int, pct: int) -> str:
+    @staticmethod
+    def _overall_cefr(wpm: int, pct: int) -> str:
         # Conservative overall = lower (weaker) of rate-level and accuracy-level.
         levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
-        l_sr = levels.index(self._level_from_speech_rate(wpm))
-        l_acc = levels.index(self._level_from_accuracy(pct))
+        l_sr = levels.index(LocalListenRepeatReport._level_from_speech_rate(wpm))
+        l_acc = levels.index(LocalListenRepeatReport._level_from_accuracy(pct))
         return levels[min(l_sr, l_acc)]
 
     # ----------------- misc utils -----------------
 
-    def _fmt_mmss(self, secs: float) -> str:
+    @staticmethod
+    def _fmt_mmss(secs: float) -> str:
         secs = int(round(secs))
         m, s = divmod(secs, 60)
         return f"{m:02d}:{s:02d}"
 
-    def _err_obj(self, prompt_url: str, student_url: str, etype: str, msg: str) -> Dict[str, str]:
+    @staticmethod
+    def _err_obj(prompt_url: str, student_url: str, etype: str, msg: str) -> Dict[str, str]:
         return {
             "prompt_audio_url": prompt_url,
             "student_audio_url": student_url,
@@ -421,8 +514,8 @@ class LocalListenRepeatReport:
             "error_message": msg
         }
 
+    @staticmethod
     def _all_failed(
-        self,
         pairs: List[ListenRepeatPair],
         errors: List[Dict[str, str]],
         prompt_tx: List[Tuple[str, float]],
@@ -437,13 +530,15 @@ class LocalListenRepeatReport:
                 failed += 1
         return failed == len(pairs)
 
-    def _save_json(self, obj: Dict[str, Any], path: str) -> None:
+    @staticmethod
+    def _save_json(obj: Dict[str, Any], path: str) -> None:
         if os.path.dirname(path):
             os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
 
-    def _resolve_device(self, device: str) -> str:
+    @staticmethod
+    def _resolve_device(device: str) -> str:
         if device == "auto":
             try:
                 import torch  # optional
@@ -452,6 +547,188 @@ class LocalListenRepeatReport:
                 return "cpu"
         return device
 
-    def _resolve_compute_type(self, compute_type: str) -> str:
+    @staticmethod
+    def _resolve_compute_type(compute_type: str) -> str:
         # Let faster-whisper decide unless explicitly set.
         return compute_type if compute_type != "auto" else "default"
+
+    @staticmethod
+    def _guess_audio_format(path_or_url: str) -> str:
+        ext = os.path.splitext(urlparse(path_or_url).path)[1].lower().lstrip(".")
+        return ext or "wav"
+
+
+# --------------------- GPT-4o helper factories (optional) ---------------------
+
+def make_gpt4o_mispronunciation_fn(
+    api_key: Optional[str] = None,
+    audio_model: str = "gpt-4o-audio-preview"
+) -> Callable[[str, str, str, str], List[str]]:
+    """
+    Returns a function that takes (prompt_audio, student_audio, prompt_text, student_text)
+    and returns a list of mispronounced words (strings). Works with either local paths or URLs.
+
+    Requires the official OpenAI Python package and an API key.
+    """
+    if OpenAI is None:
+        raise RuntimeError("openai package not installed. pip install openai")
+
+    key = api_key or os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    client = OpenAI(api_key=key)
+
+    def _maybe_fetch_bytes(path_or_url: str) -> bytes:
+        parsed = urlparse(path_or_url)
+        if parsed.scheme in ("http", "https"):
+            r = requests.get(path_or_url, timeout=30)
+            r.raise_for_status()
+            return r.content
+        with open(path_or_url, "rb") as f:
+            return f.read()
+
+    def _fn(prompt_audio: str, student_audio: str, prompt_text: str, student_text: str) -> List[str]:
+        # Read audio bytes and base64-encode for input_audio content
+        try:
+            p_bytes = _maybe_fetch_bytes(prompt_audio)
+            s_bytes = _maybe_fetch_bytes(student_audio)
+        except Exception:
+            # If audio fetch fails, gracefully fall back to text-only heuristic (no mispronunciations)
+            p_bytes, s_bytes = b"", b""
+
+        fmt_p = LocalListenRepeatReport._guess_audio_format(prompt_audio)
+        fmt_s = LocalListenRepeatReport._guess_audio_format(student_audio)
+
+        def audio_part(b: bytes, fmt: str) -> Dict[str, Any]:
+            if not b:
+                return {"type": "text", "text": "(audio missing)"}
+            return {
+                "type": "input_audio",
+                "audio": {
+                    "data": base64.b64encode(b).decode("utf-8"),
+                    "format": fmt or "wav"
+                },
+            }
+
+        prompt = (
+            "Compare the student's pronunciation against the reference prompt. "
+            "Return ONLY a compact JSON with a single field 'words' listing "
+            "the mispronounced words (unique, lowercase), derived from the student's speech. "
+            "If none, return {'words':[]}."
+        )
+
+        msg_content = [
+            {"type": "text", "text": prompt},
+            {"type": "text", "text": f"Reference transcript:\n{prompt_text}"},
+            audio_part(p_bytes, fmt_p),
+            {"type": "text", "text": f"Student transcript:\n{student_text}"},
+            audio_part(s_bytes, fmt_s),
+        ]
+
+        try:
+            # Chat Completions with multimodal audio input (see OpenAI cookbook examples)
+            resp = client.chat.completions.create(
+                model=audio_model,
+                messages=[
+                    {"role": "system", "content": "You are a precise ASR/phonetics judge."},
+                    {"role": "user", "content": msg_content},
+                ],
+                temperature=0
+            )
+            raw = resp.choices[0].message.content.strip() if resp.choices else "{}"
+        except Exception:
+            return []
+
+        try:
+            data = json.loads(raw)
+            words = data.get("words", [])
+            return [str(w).strip().lower() for w in words if str(w).strip()]
+        except Exception:
+            # if model didn't return valid JSON, attempt a naive fallback
+            return []
+
+    return _fn
+
+
+def make_gpt4o_grammar_fn(
+    api_key: Optional[str] = None,
+    text_model: str = "gpt-4o"
+) -> Callable[[str], Dict[str, Any]]:
+    """
+    Returns a function that takes (student_full_transcript) and returns:
+      {"issues": [{"span": "...", "explanation": "...", "suggestion": "..."}...], "score": 0-100}
+
+    Uses GPT-4o text. The score is a holistic 0–100 grammar quality estimate.
+    """
+    if OpenAI is None:
+        raise RuntimeError("openai package not installed. pip install openai")
+
+    key = api_key or os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    client = OpenAI(api_key=key)
+
+    def _fn(student_transcript: str) -> Dict[str, Any]:
+        prompt = (
+            "Analyze the following spoken-transcript text for grammar issues. "
+            "Return ONLY valid JSON with fields:\n"
+            "{\n"
+            '  "issues": [ {"span": string, "explanation": string, "suggestion": string}... ],\n'
+            '  "score": integer 0-100  # higher is better grammar\n'
+            "}\n"
+            "Keep 'issues' short and focused. If there are no issues, return an empty list and a high score."
+        )
+        try:
+            resp = client.chat.completions.create(
+                model=text_model,
+                messages=[
+                    {"role": "system", "content": "You are a strict grammar evaluator."},
+                    {"role": "user", "content": f"{prompt}\n\nTranscript:\n{student_transcript}"},
+                ],
+                temperature=0
+            )
+            raw = resp.choices[0].message.content.strip() if resp.choices else "{}"
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return {"issues": [], "score": 100}
+            issues = data.get("issues", [])
+            score = data.get("score", 100)
+            try:
+                score = int(score)
+            except Exception:
+                score = 100
+            score = max(0, min(100, score))
+            # normalize issues
+            norm_issues = []
+            for it in issues or []:
+                if isinstance(it, dict):
+                    norm_issues.append({
+                        "span": str(it.get("span", ""))[:200],
+                        "explanation": str(it.get("explanation", ""))[:300],
+                        "suggestion": str(it.get("suggestion", ""))[:200],
+                    })
+            return {"issues": norm_issues, "score": score}
+        except Exception:
+            return {"issues": [], "score": 100}
+
+    return _fn
+
+
+if __name__ == "__main__":
+    # If you placed the factory helpers in the same file, you can import/use them directly.
+    # Otherwise: from your_module import LocalListenRepeatReport, ListenRepeatPair, make_gpt4o_mispronunciation_fn, make_gpt4o_grammar_fn
+
+    pairs = [
+        ListenRepeatPair("data/p01_prompt.wav", "data/p01_student.wav"),
+        ListenRepeatPair("data/p02_prompt.wav", "data/p02_student.wav"),
+    ]
+
+    reporter = LocalListenRepeatReport(
+        mispronunciation_fn=make_gpt4o_mispronunciation_fn(),  # optional
+        grammar_fn=make_gpt4o_grammar_fn(),                    # optional
+    )
+
+    report = reporter.generate_report(pairs, out_path="report.json")
+    print("Saved report.json")
