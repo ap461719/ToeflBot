@@ -80,6 +80,7 @@ class LocalListenRepeatReport:
         if not key:
             raise RuntimeError("OPENAI_API_KEY not set")
         self._openai = OpenAI(api_key=key)
+        self._has_responses = hasattr(self._openai, "responses")
         self._audio_model = audio_model
         self._text_model = text_model
 
@@ -255,60 +256,79 @@ class LocalListenRepeatReport:
     # ----------------- GPT-4o calls (required) -----------------
 
     def _gpt4o_mispronunciations(self, prompt_audio: str, student_audio: str,
-                                 prompt_text: str, student_text: str) -> List[str]:
-        """
-        Call GPT-4o audio to return a list of mispronounced words.
-        We normalize audio to 16kHz mono WAV to reduce payload & errors, and we retry.
-        """
+                             prompt_text: str, student_text: str) -> List[str]:
         p_bytes = self._load_wav_bytes_16k_mono(prompt_audio)
         s_bytes = self._load_wav_bytes_16k_mono(student_audio)
 
         def audio_part(b: bytes) -> Dict[str, Any]:
             return {
                 "type": "input_audio",
-                "audio": {
-                    "data": base64.b64encode(b).decode("utf-8"),
-                    "format": "wav"
-                },
+                "audio": {"data": base64.b64encode(b).decode("utf-8"), "format": "wav"},
             }
 
+        instruction = (
+            'Compare the student’s pronunciation to the reference audio + text. '
+            'Return ONLY valid JSON: {"words": ["word1", ...]} with unique, lowercase mispronounced words. '
+            'If none, return {"words": []}.'
+        )
         system_msg = {"role": "system", "content": "You are a precise ASR/phonetics judge."}
         user_content = [
-            {"type": "text", "text":
-                "Compare the student's pronunciation against the reference audio + text. "
-                "Return ONLY valid JSON: {\"words\": [\"word1\", ...]} with unique, lowercase mispronounced words. "
-                "If none, return {\"words\": []}."
-            },
+            {"type": "text", "text": instruction},
             {"type": "text", "text": f"Reference transcript:\n{prompt_text}"},
             audio_part(p_bytes),
             {"type": "text", "text": f"Student transcript:\n{student_text}"},
             audio_part(s_bytes),
         ]
-        user_msg = {"role": "user", "content": user_content}
 
-        def _call():
-            resp = self._openai.chat.completions.create(
+        def _parse_words(raw: str) -> List[str]:
+            try:
+                return [w.strip().lower() for w in (json.loads(raw).get("words", [])) if str(w).strip()]
+            except Exception:
+                cleaned = raw.strip().strip("`")
+                if cleaned.lower().startswith("json"):
+                    cleaned = cleaned[4:].strip()
+                return [w.strip().lower() for w in (json.loads(cleaned).get("words", [])) if str(w).strip()]
+
+        # Preferred: Responses API (newer clients)
+        if self._has_responses:
+            def _call_with_rf():
+                return self._openai.responses.create(
+                    model=self._audio_model,
+                    input=[{"role": "user", "content": user_content}],
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+            def _call_without_rf():
+                return self._openai.responses.create(
+                    model=self._audio_model,
+                    input=[{"role": "user", "content": user_content}],
+                    temperature=0,
+                )
+            try:
+                resp = self._retry(_call_with_rf)
+            except TypeError as e:
+                # Older Responses signature — retry without response_format
+                if "response_format" in str(e):
+                    resp = self._retry(_call_without_rf)
+                else:
+                    raise
+            raw = getattr(resp, "output_text", "") or (resp.__dict__.get("output_text", "") or "")
+            return _parse_words(raw)
+
+        # Fallback: Chat Completions (older clients)
+        def _call_chat():
+            return self._openai.chat.completions.create(
                 model=self._audio_model,
-                messages=[system_msg, user_msg],
+                messages=[system_msg, {"role": "user", "content": user_content}],
                 temperature=0,
-                # (some deployments support this param on text modes only; harmless if ignored)
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
             )
-            return resp
-
-        resp = self._retry(_call)
+        resp = self._retry(_call_chat)
         raw = resp.choices[0].message.content.strip() if resp.choices else "{}"
-        try:
-            data = json.loads(raw)
-        except Exception:
-            # Try to salvage JSON if model wrapped it in code fences
-            raw = raw.strip().strip("`")
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
-            data = json.loads(raw)
+        return _parse_words(raw)
 
-        words = data.get("words", [])
-        return [str(w).strip().lower() for w in words if str(w).strip()]
+
+
 
     def _gpt4o_grammar(self, student_transcript: str) -> Dict[str, Any]:
         """
@@ -319,14 +339,17 @@ class LocalListenRepeatReport:
         user_msg = {
             "role": "user",
             "content": (
-                "Analyze the following spoken-transcript text for grammar issues. "
-                "Return ONLY valid JSON with fields:\n"
-                "{\n"
-                '  \"issues\": [ {\"span\": string, \"explanation\": string, \"suggestion\": string}... ],\n'
-                '  \"score\": integer 0-100\n'
-                "}\n"
-                "Keep 'issues' concise and specific to grammar.\n\n"
-                f"Transcript:\n{student_transcript}"
+                            "Analyze the transcript ONLY for GRAMMAR (agreement, tense, articles, prepositions, word order).\n"
+            "STRICTLY IGNORE: mishears, nonsense tokens, misspellings from ASR/pronunciation, and simple word choice.\n"
+            "If a token is not a valid English word, IGNORE it and do not flag it.\n"
+            "Return ONLY valid JSON with fields:\n"
+            "{\n"
+            '  "issues": [ {"span": string, "explanation": string, "suggestion": string}... ],\n'
+            '  "score": integer 0-100\n'
+            "}\n"
+            "Keep 'issues' concise and specific to grammar.\n\n"
+            f"Transcript:\n{student_transcript}"
+
             )
         }
 
@@ -521,6 +544,25 @@ class LocalListenRepeatReport:
             return 100 if not mispronounced else 0
         pct = 1.0 - (len(mispronounced) / float(total_words))
         return max(0, min(100, int(round(100 * pct))))
+
+
+    @staticmethod
+    def _split_wav_bytes(b: bytes, chunk_ms: int = 20000) -> List[bytes]:
+        """
+        Split a 16kHz mono WAV byte stream into ~chunk_ms segments (default: 20s),
+        returning a list of WAV-bytes chunks.
+        """
+        try:
+         seg = AudioSegment.from_file(BytesIO(b), format="wav")
+        except Exception:
+            return [b]  # if parsing fails, just return original
+        chunks = []
+        for start in range(0, len(seg), chunk_ms):
+            piece = seg[start:start + chunk_ms]
+            buf = BytesIO()
+            piece.export(buf, format="wav")
+            chunks.append(buf.getvalue())
+        return chunks
 
     # ----------------- section builders -----------------
 
