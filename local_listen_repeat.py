@@ -35,7 +35,7 @@ class ListenRepeatPair:
 
 # --------------------- Main class ---------------------
 
-class LocalListenRepeatReport:
+class LocalSpeakingAssessmentReport:
     """
     End-to-end local pipeline (no server needed):
 
@@ -543,7 +543,7 @@ class LocalListenRepeatReport:
         system = {"role":"system","content":"You evaluate discourse coherence and structure."}
         user = {"role":"user","content":(
             "Rate the discourse coherence/organization of the text using CEFR bands (A1..C1). "
-            "Return ONLY JSON like {\"label\":\"B1\"}.\n\nText:\n"+answer_text)}
+            'Return ONLY JSON like {"label":"B1"}.\n\nText:\n'+answer_text)}
         resp = self._retry(lambda: self._openai.chat.completions.create(
             model=self._text_model, messages=[system,user], temperature=0,
             response_format={"type":"json_object"}))
@@ -816,8 +816,8 @@ class LocalListenRepeatReport:
     @staticmethod
     def _overall_cefr(wpm: int, pct: int) -> str:
         levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
-        l_sr = levels.index(LocalListenRepeatReport._level_from_speech_rate(wpm))
-        l_acc = levels.index(LocalListenRepeatReport._level_from_accuracy(pct))
+        l_sr = levels.index(LocalSpeakingAssessmentReport._level_from_speech_rate(wpm))
+        l_acc = levels.index(LocalSpeakingAssessmentReport._level_from_accuracy(pct))
         return levels[min(l_sr, l_acc)]
 
     # ----------------- misc utils -----------------
@@ -915,29 +915,7 @@ class LocalListenRepeatReport:
             wav16.export(buf, format="wav")
             return buf.getvalue()
         except Exception:
-            return LocalListenRepeatReport._maybe_fetch_bytes(path_or_url)
-
-
-
-# if __name__ == "__main__":
-#     # ----- Listen & Repeat -----
-#     pairs = [
-#         ListenRepeatPair("data/p01_prompt.wav", "data/p01_student.wav"),
-#         ListenRepeatPair("data/p02_prompt.wav", "data/p02_student.wav"),
-#     ]
-#     reporter = LocalListenRepeatReport(task="listen_repeat")
-#     report = reporter.generate_report(pairs, out_path="listen_repeat_report.json")
-#     print("Saved listen_repeat_report.json")
-
-#     # ----- Interview (example) -----
-#     # Replace with your real interviewer/answer URLs (or local files)
-#     interview_pairs = [
-#         ListenRepeatPair("data/p01_prompt.wav", "data/p01_student.wav"),
-#         ListenRepeatPair("data/p02_prompt.wav", "data/p02_student.wav"),
-#     ]
-#     interview_reporter = LocalListenRepeatReport(task="interview")
-#     interview_report = interview_reporter.generate_report(interview_pairs, out_path="interview_report.json")
-#     print("Saved interview_report.json")
+            return LocalSpeakingAssessmentReport._maybe_fetch_bytes(path_or_url)
 
 
 if __name__ == "__main__":
@@ -953,5 +931,4 @@ if __name__ == "__main__":
         prompt, student = p.split(":", 1)
         prs.append(ListenRepeatPair(prompt, student))
 
-    LocalListenRepeatReport(task=args.task).generate_report(prs, args.out)
-
+    LocalSpeakingAssessmentReport(task=args.task).generate_report(prs, args.out)
