@@ -54,7 +54,7 @@ The tool downloads (or opens) audio, transcribes it with **faster-whisper**, and
 - A GPU is optional; CPU works. (For GPU, install CUDA-capable PyTorch; faster-whisper will detect it.)
 
 ### Python packages
-pip install -U faster-whisper pydub jiwer requests openai python-dotenv
+pip install -r requirements.txt
 
 ## Installation
 - Ensure FFmpeg is installed:
@@ -69,7 +69,7 @@ macOS (Homebrew): brew install ffmpeg
 
 ## Run Listen & Repeat
 ```bash
-python speaking_report.py \
+python local_listen_repeat.py \
   --task listen_repeat \
   --out out/listen_report.json \
   --pairs "data/p01_prompt.wav:data/p01_student.wav" \
@@ -80,7 +80,7 @@ python speaking_report.py \
 ## Run Interview
 
 ```bash
-python speaking_report.py \
+python local_listen_repeat.py \
   --task interview \
   --out out/interview_report.json \
   --pairs "data/q1.wav:data/a1.wav" \
