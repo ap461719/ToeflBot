@@ -71,31 +71,36 @@ macOS (Homebrew): brew install ffmpeg
 - OPENAI_API_KEY=sk-...
 - The script reads this automatically via python-dotenv. You can also pass api_key to the class directly if using the API.
 
-### Usage (CLI)
+# CLI
 
-## Listen & Repeat
-- python local_listen_repeat.py \
--  --task listen_repeat \
--  --out out/listen_repeat_report.json \
-- --pairs data/p01_prompt.wav:data/p01_student.wav \
--          data/p02_prompt.wav:data/p02_student.wav
-
-
-## Interview 
-
-- python local_listen_repeat.py \
--  --task interview \
--  --out out/interview_report.json \
--  --pairs https://example.com/q1.wav:https://example.com/a1.wav\
--         https://example.com/q2.wav:https://example.com/a2.wav
+## Run Listen & Repeat
+```bash
+python speaking_report.py \
+  --task listen_repeat \
+  --out out/listen_report.json \
+  --pairs "data/p01_prompt.wav:data/p01_student.wav" \
+          "data/p02_prompt.wav:data/p02_student.wav"
+   data/p02_prompt.wav:data/p02_student.wav
 
 
-- --pairs accepts one or more items, each in the form    prompt:student
+## Run Interview
+
+```bash
+python speaking_report.py \
+  --task interview \
+  --out out/interview_report.json \
+  --pairs "data/q1.wav:data/a1.wav" \
+          "data/q2.wav:data/a2.wav"
+
+
+- `--pairs` accepts one or more items, each in the form `prompt:student`
 - Each side can be a local path or an HTTPS URL
 - The output directory is created if it doesn’t exist
 
+
 ## Programmatic Use
 
+```python
 from speaking_report import LocalSpeakingAssessmentReport, ListenRepeatPair
 
 # Listen & Repeat
@@ -114,30 +119,33 @@ int_pairs = [
 interview = LocalSpeakingAssessmentReport(task="interview")
 interview.generate_report(int_pairs, out_path="out/interview_report.json")
 
+
+## Output (JSON) – What You Get
+
+All reports share common fields; **Interview** adds a few more.
+
+### Common Fields
+
+```json
 {
   "version": "1.0",
   "generation_failed": false,
-  "errors": [
-    // Any pair-level errors (download, GPT, etc.), if present
-  ],
+  "errors": [],
   "overall_score": { "cefr": "B1", "toefl_score": "4", "old_toefl_score": "23" },
   "speech_rate": 123,
   "duration": "02:37",
   "repeat_accuracy": { "score": 76 },
-
-  "incorrect_segments": ["..."],          // prompt spans the student missed/changed
+  "incorrect_segments": ["..."],
   "mispronounced_words": [{"word": "temperature"}],
-
   "fluency": {
     "speech_rate_level": "B1",
-    "coherence_level": "B1",              // proxy from repeat accuracy
+    "coherence_level": "B1",
     "pause_frequency_level": "B2",
     "pause_appropriateness_level": "A2",
     "repeat_accuracy_level": "B1",
     "description": "Speech is understandable ...",
     "description_cn": "整体可理解 ..."
   },
-
   "pronunciation": {
     "prosody_rhythm_level": "B1",
     "vowel_fullness_level": "B1",
@@ -146,31 +154,28 @@ interview.generate_report(int_pairs, out_path="out/interview_report.json")
     "description": "Pronunciation is generally intelligible ...",
     "description_cn": "发音整体清晰 ..."
   },
-
   "grammar": {
     "accuracy_level": "B1",
     "repeat_accuracy_level": "B1",
     "issues": [
-      { "span": "there is many data", "explanation": "Agreement ...", "suggestion": "there are many data" }
+      { "span": "there is many data", "explanation": "Agreement error", "suggestion": "there are many data" }
     ]
   }
 }
 
-## Interview-only additions
+### Interview-only Additions
 
+```json
 {
-  "relevance": { "score": "B2" },     // embeddings (question vs answer)
-  "discourse": { "score": "B1" },     // GPT-4o coherence label
-
+  "relevance": { "score": "B2" },
+  "discourse": { "score": "B1" },
   "vocabulary": {
     "complexity_level": "B1",
     "diversity_level": "B2",
     "description": "Lexical complexity and diversity ...",
     "description_cn": "..."
   },
-
-  "fluency": { "word_repetition_level": "B2" },  // added to fluency
-
+  "fluency": { "word_repetition_level": "B2" },
   "grammar": {
     "accuracy_level": "B1",
     "errors": [
