@@ -71,7 +71,7 @@ macOS (Homebrew): brew install ffmpeg
 - OPENAI_API_KEY=sk-...
 - The script reads this automatically via python-dotenv. You can also pass api_key to the class directly if using the API.
 
-# CLI
+## CLI
 
 ## Run Listen & Repeat
 ```bash
@@ -80,9 +80,9 @@ python speaking_report.py \
   --out out/listen_report.json \
   --pairs "data/p01_prompt.wav:data/p01_student.wav" \
           "data/p02_prompt.wav:data/p02_student.wav"
-   data/p02_prompt.wav:data/p02_student.wav
+          "data/p02_prompt.wav:data/p02_student.wav"
 
-
+```
 ## Run Interview
 
 ```bash
@@ -91,7 +91,7 @@ python speaking_report.py \
   --out out/interview_report.json \
   --pairs "data/q1.wav:data/a1.wav" \
           "data/q2.wav:data/a2.wav"
-
+```
 
 - `--pairs` accepts one or more items, each in the form `prompt:student`
 - Each side can be a local path or an HTTPS URL
@@ -118,7 +118,7 @@ int_pairs = [
 ]
 interview = LocalSpeakingAssessmentReport(task="interview")
 interview.generate_report(int_pairs, out_path="out/interview_report.json")
-
+```
 
 ## Output (JSON) – What You Get
 
@@ -162,6 +162,7 @@ All reports share common fields; **Interview** adds a few more.
     ]
   }
 }
+```
 
 ### Interview-only Additions
 
@@ -197,7 +198,7 @@ All reports share common fields; **Interview** adds a few more.
     "description": ""
   }
 }
-
+```
 
 ## How It Works (brief)
 
