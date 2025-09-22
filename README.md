@@ -23,12 +23,6 @@ The tool downloads (or opens) audio, transcribes it with **faster-whisper**, and
   - [Common fields](#common-fields)
   - [Interview-only additions](#interview-only-additions)
 - [How It Works (brief)](#how-it-works-brief)
-- [Configuration Knobs](#configuration-knobs)
-- [Troubleshooting](#troubleshooting)
-- [Security & Privacy](#security--privacy)
-- [Roadmap / Ideas](#roadmap--ideas)
-- [License](#license)
-- [Quick Copy Commands](#quick-copy-commands)
 
 ---
 
