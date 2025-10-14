@@ -1,0 +1,67 @@
+{
+  "items": [
+    {
+      "audio_path": "/home/anushkapachaury/TOEFLEXP/ToeflBot/icnale_audio/ICNALE_SM_Audio/ICNALE_SM_CHN_N600/SM_CHN_PTJ1_001_B1_1.mp3",
+      "topic": "part-time employment",
+      "cefr_true": "B1",
+      "cefr_pred": "B1",
+      "speech_rate": 105,
+      "repeat_accuracy": 0,
+      "duration": "01:00"
+    },
+    {
+      "audio_path": "/home/anushkapachaury/TOEFLEXP/ToeflBot/icnale_audio/ICNALE_SM_Audio/ICNALE_SM_CHN_N600/SM_CHN_PTJ1_002_B1_2.mp3",
+      "topic": "part-time employment",
+      "cefr_true": "B1",
+      "cefr_pred": "A2",
+      "speech_rate": 49,
+      "repeat_accuracy": 0,
+      "duration": "01:00"
+    },
+    {
+      "audio_path": "/home/anushkapachaury/TOEFLEXP/ToeflBot/icnale_audio/ICNALE_SM_Audio/ICNALE_SM_CHN_N600/SM_CHN_PTJ1_003_B1_1.mp3",
+      "topic": "part-time employment",
+      "cefr_true": "B1",
+      "cefr_pred": "A2",
+      "speech_rate": 82,
+      "repeat_accuracy": 0,
+      "duration": "01:00"
+    },
+    {
+      "audio_path": "/home/anushkapachaury/TOEFLEXP/ToeflBot/icnale_audio/ICNALE_SM_Audio/ICNALE_SM_CHN_N600/SM_CHN_PTJ1_004_B1_2.mp3",
+      "topic": "part-time employment",
+      "cefr_true": "B1",
+      "cefr_pred": "A2",
+      "speech_rate": 71,
+      "repeat_accuracy": 0,
+      "duration": "01:00"
+    },
+    {
+      "audio_path": "/home/anushkapachaury/TOEFLEXP/ToeflBot/icnale_audio/ICNALE_SM_Audio/ICNALE_SM_CHN_N600/SM_CHN_PTJ1_005_B1_1.mp3",
+      "topic": "part-time employment",
+      "cefr_true": "B1",
+      "cefr_pred": "A2",
+      "speech_rate": 79,
+      "repeat_accuracy": 0,
+      "duration": "01:00"
+    }
+  ],
+  "metrics": {
+    "ACC": 20.0,
+    "ADJ": 100.0,
+    "ACC_MC": 20.0,
+    "RMSE": 0.8944271909999159,
+    "RMSE_MC": 0.8944271909999159,
+    "PCC": 0.0,
+    "support": 5,
+    "label_order": [
+      "A1",
+      "A2",
+      "B1",
+      "B2",
+      "C1",
+      "C2",
+      "N"
+    ]
+  }
+}

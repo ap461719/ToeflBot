@@ -18,7 +18,11 @@ def infer_topic(name_upper: str) -> str:
 
 # Extract CEFR from tail of filename. Examples:
 # ..._B1.mp3, ..._B1_1.mp3, ..._C1_2.wav, ..._N.m4a
-LAB_RX = re.compile(r"_(A1|A2|B1|B2|C1|C2|N)(?:_[12])?(?:\.[A-Za-z0-9]+)?$", re.IGNORECASE)
+LAB_RX = re.compile(
+    r"_(A1|A2|B1|B2|C1|C2|N)(?:_[0-9]+)?(?:\.[A-Za-z0-9]+)?$",
+    re.IGNORECASE
+)
+
 
 rows = []
 for dirpath, _, files in os.walk(ROOT):
@@ -32,7 +36,7 @@ for dirpath, _, files in os.walk(ROOT):
         m = LAB_RX.search(up)
         if not m:
             # If any files don’t match, skip them silently (or print a warning)
-            # print("Skipping (no label found):", fn)
+            print("Skipping (no label found):", fn)
             continue
         lab = m.group(1).upper()  # CEFR (N = native)
         topic = infer_topic(up)

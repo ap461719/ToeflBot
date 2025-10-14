@@ -283,7 +283,37 @@ class LocalSpeakingAssessmentReport:
                 }
 
             # 6) Overall block (outputs one CEFR label)
-            overall_score = self._overall_block(speech_rate, acc_like)
+            if self.task == "listen_repeat":
+                overall_score = self._overall_block(speech_rate, acc_like)
+            else:
+                # ------- NEW: holistic blend for interview -------
+                # component scores (0..100)
+                speech_s = self._speech_rate_score(speech_rate)
+                pause_s  = self._pause_scores(pause_stats["pauses_per_min"], long_ratio)
+                rel_s    = self._relevance_score(extra_blocks["relevance"]["score"])  # rel_label mapped to score
+                gram_s   = acc_like  # already grammar-based 0..100 (fallback 80 if missing)
+
+                # weights (tune later)
+                w_grammar, w_speech, w_pauses, w_relevance = 0.35, 0.25, 0.20, 0.20
+                blend = (w_grammar*gram_s + w_speech*speech_s + w_pauses*pause_s + w_relevance*rel_s)
+
+                overall_score = self._overall_block_from_blend(blend)
+
+                # expose detail for debugging/analysis
+                extra_blocks["overall_detail"] = {
+                    "blend": int(round(blend)),
+                    "components": {
+                        "grammar": int(round(gram_s)),
+                        "speech_rate": speech_s,
+                        "pauses": pause_s,
+                        "relevance": rel_s
+                    },
+                    "weights": {
+                        "grammar": w_grammar, "speech_rate": w_speech,
+                        "pauses": w_pauses, "relevance": w_relevance
+                    }
+                }
+                # ------- end NEW -------
 
             # 7) generation_failed flag (true only if every pair failed)
             generation_failed = self._all_failed(pairs, errors, prompt_tx, student_tx)
@@ -797,6 +827,16 @@ class LocalSpeakingAssessmentReport:
             "old_toefl_score": old_toefl_0_30
         }
 
+    # ------- NEW: overall block for blended 0..100 score (interview) -------
+    def _overall_block_from_blend(self, blend_score: float) -> Dict[str, str]:
+        blend_int = int(round(blend_score))
+        return {
+            "cefr": self._score_to_cefr(blend_int),
+            "toefl_score": str(self._toefl_band(blend_int)),
+            "old_toefl_score": str(int(round(blend_int * 0.3)))
+        }
+    # ------- end NEW -------
+
     # ----------------- label helpers -----------------
 
     @staticmethod
@@ -830,6 +870,50 @@ class LocalSpeakingAssessmentReport:
         l_sr = levels.index(LocalSpeakingAssessmentReport._level_from_speech_rate(wpm))
         l_acc = levels.index(LocalSpeakingAssessmentReport._level_from_accuracy(pct))
         return levels[min(l_sr, l_acc)]
+
+    # ------- NEW: scoring helpers used in blended interview score -------
+
+    def _speech_rate_score(self, wpm: int) -> int:
+        # piecewise-linear mapping to 0..100
+        x = max(0, int(wpm))
+        if x <= 90:   return int(40 * (x/90))                 # 0..40
+        if x <= 110:  return 40 + int(15*(x-90)/20)           # 40..55
+        if x <= 130:  return 55 + int(17*(x-110)/20)          # 55..72
+        if x <= 150:  return 72 + int(16*(x-130)/20)          # 72..88
+        if x <= 170:  return 88 + int(8*(x-150)/20)           # 88..96
+        return 98
+
+    def _pause_scores(self, ppm: float, long_ratio: float) -> int:
+        # map existing labels to mid-band scores and average
+        freq_lab = self._pause_frequency_level(ppm)
+        appr_lab = self._pause_appropriateness_level(long_ratio)
+        return int(round((self._score_from_label(freq_lab) + self._score_from_label(appr_lab)) / 2))
+
+    def _relevance_score(self, rel_label_or_sim) -> int:
+        # our _embedding_relevance returns a CEFR-ish label; map to score
+        if isinstance(rel_label_or_sim, str):
+            return self._score_from_label(rel_label_or_sim)
+        try:
+            sim = float(rel_label_or_sim)
+        except Exception:
+            return 50
+        s = 30 + (sim - 0.55) * (65/0.35)  # stretch 0.55..0.90 -> ~30..95
+        return int(max(0, min(100, s)))
+
+    @staticmethod
+    def _score_from_label(lab: str) -> int:
+        table = {"A1": 40, "A2": 55, "B1": 72, "B2": 88, "C1": 96, "C2": 99}
+        return table.get(lab, 50)
+
+    @staticmethod
+    def _score_to_cefr(s: float) -> str:
+        s = float(s)
+        if s < 50: return "A1"
+        if s < 65: return "A2"
+        if s < 80: return "B1"
+        if s < 90: return "B2"
+        return "C1"
+    # ------- end NEW -------
 
     # ----------------- misc utils -----------------
 

@@ -175,7 +175,6 @@ def main():
             "cefr_true": lab,
             "cefr_pred": pred_lab,
             "speech_rate": report.get("speech_rate", None),
-            "repeat_accuracy": (report.get("repeat_accuracy") or {}).get("score", None),
             "duration": report.get("duration", None),
         })
 
